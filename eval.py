@@ -9,6 +9,7 @@ from matplotlib.ticker import MaxNLocator
 import argparse
 import time
 from matplotlib.gridspec import GridSpec
+from pathlib import Path
 
 from utils.processing import process_llamas
 
@@ -71,19 +72,19 @@ def eval(opt, model):
     plt.imshow(x_test[0,0,:,:], cmap = 'jet')#, vmax=x_test.max() , vmin=x_test.min())
     plt.title('$U-Net$')
     plt.colorbar()
-    plt.tight_layout()
+    plt.subplots_adjust()
 
     plt.subplot(172)
     plt.imshow(x_test[0,1,:,:], cmap = 'jet')#, vmax=x_test.max(), vmin=x_test.min())
     plt.title('$U-Net$')
     plt.colorbar()
-    plt.tight_layout()
+    plt.subplots_adjust()
 
     plt.subplot(173)
     plt.imshow(x_test[0,2,:,:], cmap = 'jet')#, vmax=x_test.max(), vmin=x_test.min())
     plt.title('$U-Net$')
     plt.colorbar()
-    plt.tight_layout()
+    plt.subplots_adjust()
 
     plt.subplot(174)
     plt.imshow(y_test[N,:,:], cmap = 'jet', vmin=1500, vmax=2205)
@@ -94,7 +95,7 @@ def eval(opt, model):
     plt.imshow(y_test_pred[N], cmap = 'jet', vmin=1500, vmax=2205)
     plt.title('$U-Net$')
     plt.colorbar()
-    plt.tight_layout()
+    plt.subplots_adjust()
 
     abs_err = np.abs(y_test[N] - y_test_pred[N])
     plt.subplot(176)
@@ -186,7 +187,7 @@ def eval_exp(opt, model):
     axcontourf(axes[3], data["r"], data["z"], t_cgan_caseC, title, levels=np.linspace(1500, t_max, 50), Y_MIN=y_min, Y_MAX=y_max, show_axes=False)
     diferencia = axcontourf(axes[4], data["r"], data["z"], abs_err, r'$\Delta_{T_{s}}$', levels=np.linspace(-100, 100, 50), CMAP='bwr', Y_MIN=y_min, Y_MAX=y_max, show_axes=False)
     
-    cbar_ref = fig.colorbar(referencia, cax=axes[0], location='left', ticks=MaxNLocator(6))
+    cbar_ref = fig.colorbar(referencia, cax=axes[0], ticks=MaxNLocator(6))
     cbar_ref.ax.yaxis.set_ticks_position('left')
     fig.colorbar(diferencia, ticks=MaxNLocator(6))
 
@@ -296,11 +297,20 @@ def compare_extended(opt, model_unet, model_attention_unet,
     unet_trt_fp16_output = model_inference(model_unet_trt_fp16, Py_exp_interp, "UNet TRT fp16")
     unet_trt_int8_output = model_inference(model_unet_trt_int8, Py_exp_interp, "UNet TRT int8")
 
+    # ===== DEBUG FP32 vs FP16 UNet =====
+    diff_unet = np.max(np.abs(unet_trt_fp32_output - unet_trt_fp16_output))
+    print(f"[DEBUG] Max |UNet fp32 - fp16| = {diff_unet:.6e}")
+
     # Inferencias Attention UNet
     attention_unet_output = model_inference(model_attention_unet, Py_exp_interp, "Attention UNet Base")
     attention_unet_trt_fp32_output = model_inference(model_attention_unet_trt_fp32, Py_exp_interp, "Attention UNet TRT FP32")
     attention_unet_trt_fp16_output = model_inference(model_attention_unet_trt_fp16, Py_exp_interp, "Attention UNet TRT fp16")
     attention_unet_trt_int8_output = model_inference(model_attention_unet_trt_int8, Py_exp_interp, "Attention UNet TRT int8")
+
+    # ===== DEBUG FP32 vs FP16 Attention UNet =====
+    diff_att = np.max(np.abs(attention_unet_trt_fp32_output - attention_unet_trt_fp16_output))
+    print(f"[DEBUG] Max |AttUNet fp32 - fp16| = {diff_att:.6e}")
+
 
     # Función para calcular error absoluto
     def abs_error(base, optimized):
@@ -330,13 +340,13 @@ def compare_extended(opt, model_unet, model_attention_unet,
         y_min, y_max, t_max = 1, 5.5, 2100
  
     # Plot para UNet
-    unet = axcontourf(axes[0][2], r, z, unet_output, 'Modelo Base', levels=np.linspace(1500, t_max, 50),Y_MAX=y_max, Y_MIN=y_min)
+    unet = axcontourf(axes[0][2], r, z, unet_output, 'Modelo Base', levels=np.linspace(1500, t_max, 50),CMAP='inferno',Y_MAX=y_max, Y_MIN=y_min)
     unet_fp32 = axcontourf(axes[0][3], r, z, abs_error(unet_output, unet_trt_fp32_output), '$\Delta_t$ TRT fp32', levels=np.linspace(-100, 100, 50), CMAP='bwr',Y_MAX=y_max, Y_MIN=y_min,show_axes=False)
     unet_fp16 = axcontourf(axes[0][4], r, z, abs_error(unet_output, unet_trt_fp16_output), '$\Delta_t$ TRT fp16', levels=np.linspace(-100, 100, 50), CMAP='bwr',Y_MAX=y_max, Y_MIN=y_min,show_axes=False)
     unet_int8 = axcontourf(axes[0][5], r, z, abs_error(unet_output, unet_trt_int8_output), '$\Delta_t$ TRT int8', levels=np.linspace(-100, 100, 50), CMAP='bwr',Y_MAX=y_max, Y_MIN=y_min,show_axes=False,ftitle="U-Net")
 
     # Plot para Attention UNet
-    attunet = axcontourf(axes[1][2], r, z, attention_unet_output, 'Modelo Base', levels=np.linspace(1500, t_max, 50),Y_MAX=y_max, Y_MIN=y_min)
+    attunet = axcontourf(axes[1][2], r, z, attention_unet_output, 'Modelo Base', levels=np.linspace(1500, t_max, 50),CMAP='inferno',Y_MAX=y_max, Y_MIN=y_min)
     attunet_fp32 = axcontourf(axes[1][3], r, z, abs_error(attention_unet_output, attention_unet_trt_fp32_output), '$\Delta_t$ TRT fp32', levels=np.linspace(-100, 100, 50), CMAP='bwr',Y_MAX=y_max, Y_MIN=y_min,show_axes=False)
     attunet_fp16 = axcontourf(axes[1][4], r, z, abs_error(attention_unet_output, attention_unet_trt_fp16_output), '$\Delta_t$ TRT fp16', levels=np.linspace(-100, 100, 50), CMAP='bwr',Y_MAX=y_max, Y_MIN=y_min,show_axes=False)
     attunet_int8 = axcontourf(axes[1][5], r, z, abs_error(attention_unet_output, attention_unet_trt_int8_output), '$\Delta_t$ TRT int8', levels=np.linspace(-100, 100, 50), CMAP='bwr',Y_MAX=y_max, Y_MIN=y_min,show_axes=False,ftitle="Att. U-Net")
@@ -366,6 +376,11 @@ def compare_all(opt):
     attunet_fp32 = load_model(opt,'tensorrt', 'weights/attunet_fp32.engine')
     attunet_fp16 = load_model(opt,'tensorrt', 'weights/attunet_fp16.engine')
     attunet_int8 = load_model(opt,'tensorrt', 'weights/attunet_int8.engine')
+    print("UNet TRT fp32 id:", id(unet_fp32))
+    print("UNet TRT fp16 id:", id(unet_fp16))
+    print("AttUNet TRT fp32 id:", id(attunet_fp32))
+    print("AttUNet TRT fp16 id:", id(attunet_fp16))
+
 
     compare_extended(opt, model_unet, model_attention_unet, 
                      unet_fp32, unet_fp16, unet_int8, 
@@ -373,13 +388,108 @@ def compare_all(opt):
 
 def closeness(opt, model, engines):
     model.eval()
+    for engine in engines.values():
+        engine.eval()
+
+    porcentajes = [0.005, 0.01, 0.1, 0.2, 0.5, 1]
+
+    engine_stats = {
+        name: {
+            'total': 0,
+            'close_counts': [0] * len(porcentajes)
+        }
+        for name in engines.keys()
+    }
+
+    # -----------------------------
+    # Descubrir imágenes
+    # -----------------------------
+    dataset_path = Path(opt.dataset)
+    imagenes = sorted(dataset_path.rglob("*.tiff"))
+
+    print(f"[INFO] Imágenes encontradas: {len(imagenes)}")
+    print("[INFO] Preprocesando imágenes (cache)...")
+
+    # -----------------------------
+    # CACHEO: procesar UNA sola vez
+    # -----------------------------
+    inputs_cache = []
+
+    for img_path in imagenes:
+        data = process_llamas(str(img_path))
+        data = torch.tensor([data]).float().to(device)
+        inputs_cache.append(data)
+
+    print("[INFO] Cache de tensores listo.")
+
+    # -----------------------------
+    # PRIMERA PASADA: tolerancias
+    # -----------------------------
+    outputs_all_list = []
+
+    with torch.no_grad():
+        for data in inputs_cache:
+            out_base = model(data)
+            outputs_all_list.append(out_base.cpu())
+
+            for engine in engines.values():
+                out_eng = engine(data)
+                outputs_all_list.append(out_eng.cpu())
+
+    outputs_all = torch.cat(outputs_all_list).flatten().numpy()
+    max_value = np.percentile(np.abs(outputs_all), 90)
+    rtols = [p * max_value for p in porcentajes]
+
+    print("[INFO] Tolerancias calculadas.")
+
+    # -----------------------------
+    # SEGUNDA PASADA: closeness
+    # -----------------------------
+    with torch.no_grad():
+        for data in inputs_cache:
+            out_base = model(data)
+            num_elementos_por_imagen = out_base.numel()
+
+            for name, engine in engines.items():
+                out_eng = engine(data)
+                engine_stats[name]['total'] += 1
+
+                for idx, rtol in enumerate(rtols):
+                    close_values = torch.isclose(
+                        out_base, out_eng, atol=rtol, rtol=0
+                    )
+                    engine_stats[name]['close_counts'][idx] += close_values.sum().item()
+
+    # -----------------------------
+    # TABLA FINAL
+    # -----------------------------
+    header = [f"atol {porcentajes[i]}={rtols[i]:.5f}" for i in range(len(porcentajes))]
+    table = "| engine | " + " | ".join(header) + " |\n"
+    table += "|" + "--------|" * (len(header) + 1) + "\n"
+
+    for name, stats in engine_stats.items():
+        total = stats['total'] * num_elementos_por_imagen
+        percentages = [
+            f"{100.0 * c / total:.2f}%" if total > 0 else "0.00%"
+            for c in stats['close_counts']
+        ]
+        table += f"| {name} | " + " | ".join(percentages) + " |\n"
+
+    print("\nRegression Closeness (img_preprocess)")
+    print(table)
+
+"""
+def closeness(opt, model, engines):
+    model.eval()
     porcentajes = [0.005, 0.01, 0.1, 0.2, 0.5, 1]
     engine_stats = {name: {'correct': 0, 'total': 0, 'close_counts': [0]*len(porcentajes)} for name in engines.keys()}
     outputs_all_list = []
-    imagenes = sorted(os.listdir(opt.dataset))
+    dataset_path = Path(opt.dataset)
+    imagenes = sorted(dataset_path.rglob("*.tiff"))
     
     for img_name in imagenes:
-        img_path = os.path.join(opt.dataset, img_name)
+        img_path = str(img_name)
+        # print(img_path)
         data = process_llamas(img_path)
         data = torch.tensor([data]).float().to(device)
         #if torch.isnan(data).any() or torch.isinf(data).any():
@@ -401,7 +511,8 @@ def closeness(opt, model, engines):
     rtols = [p * max_value for p in porcentajes]
     
     for img_name in imagenes:
-        img_path = os.path.join(opt.dataset, img_name)
+        img_path = str(img_name)
+        # print(img_path)
         data = process_llamas(img_path)    
         data = torch.tensor([data]).float().to(device)
         #if torch.isnan(data).any() or torch.isinf(data).any():
@@ -435,7 +546,8 @@ def closeness(opt, model, engines):
         table += f"| {name} | " + " | ".join(close_percentages) + " |\n"
     
     print(table)
-    
+"""
+
 def load_closeness(opt):
     model_unet = load_model(opt,'unet', 'weights/unet.pth')
     model_attention_unet = load_model(opt,'attunet', 'weights/attunet.pth')
@@ -452,53 +564,62 @@ def load_closeness(opt):
 
 def latencia(opt):
     model = load_model(opt, opt.model, opt.weights)
-    model.eval()  # Asegurar que el modelo está en modo de evaluación
-
+    model.eval()
     tiempos_procesamiento = []
-    
-    # Recorrer todas las imágenes en el dataset
-    imagenes = sorted(os.listdir(opt.dataset))
+
+    # Recolectar todas las imágenes .tiff de subcarpetas
+    dataset_path = Path(opt.dataset)
+    imagenes = sorted(dataset_path.rglob("*.tiff"))
+
+    # Tomar solo 10 imágenes para la prueba
+    # imagenes = imagenes[:10]
+
     batch_size = opt.batch_size if hasattr(opt, 'batch_size') else 1
-    
+
     for i in range(0, len(imagenes), batch_size):
         batch_imgs = imagenes[i:i + batch_size]
         batch_data = []
-        
+
         try:
-            for img_name in batch_imgs:
-                img_path = os.path.join(opt.dataset, img_name)
-                data = process_llamas(img_path)  # Preprocesar la imagen
-                batch_data.append(data)
-            batch_data = torch.tensor(batch_data).float()
+            for img_file in batch_imgs:
+                img_path = str(img_file)
+                # print(img_path)
+                tensor = process_llamas(img_path)
+                if tensor is None:
+                    continue
+                batch_data.append(tensor)
 
-            start_time = time.time()
+            if not batch_data:
+                continue
 
-            batch_data = batch_data.to(device)
+            batch_tensor = torch.tensor(batch_data).float().to(device)
+
+            start = time.time()
             with torch.no_grad():
-                output = model(batch_data)  # Realizar la inferencia
+                out = model(batch_tensor)
                 torch.cuda.synchronize()
-                output = output.cpu()
-                
-            end_time = time.time()
-            
-            tiempos_procesamiento.append(end_time - start_time)
+            end = time.time()
+
+            tiempos_procesamiento.append(end - start)
+
         except Exception as e:
             print(f"Error procesando imágenes {batch_imgs}: {e}")
-    
-    if tiempos_procesamiento:
-        if batch_size == 1:
-            # Si el batch size es 1, calcular latencia promedio y máxima
-            latencia_maxima = max(tiempos_procesamiento)
-            latencia_promedio = sum(tiempos_procesamiento) / len(tiempos_procesamiento)
-            return latencia_maxima, latencia_promedio
-        else:
-            # Si el batch size es mayor a 1, calcular throughput en inferencias por segundo
-            throughput = [batch_size / t for t in tiempos_procesamiento if t > 0]
-            throughput_promedio = sum(throughput) / len(throughput)
-            throughput_maximo = max(throughput)
-            return throughput_maximo, throughput_promedio
-    else:
+
+    if not tiempos_procesamiento:
         return None, None
+
+    if batch_size == 1:
+        return max(tiempos_procesamiento), sum(tiempos_procesamiento)/len(tiempos_procesamiento)
+    #else:
+    #    thr = [batch_size/t for t in tiempos_procesamiento if t > 0]
+    #    return max(thr), sum(thr)/len(thr)
+    else:
+        thr = [batch_size/t for t in tiempos_procesamiento if t > 0]
+        if not thr:
+            return None, None
+        t_max, t_avg = max(thr), sum(thr)/len(thr)
+        print(f"Throughput → max: {t_max:.2f} img/s | promedio: {t_avg:.2f} img/s")
+        return t_max, t_avg
 
 def parse_opt():
     parser = argparse.ArgumentParser()

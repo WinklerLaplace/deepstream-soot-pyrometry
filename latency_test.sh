@@ -1,30 +1,47 @@
 #!/bin/bash
 
-# Define los modelos y los tamaños de batch size
-models=("unet" "attunet")
-batch_sizes=(1 2 4 8 16 32)
+BATCHES=(2 4 8 16 32)
+DATASET="datasets/img_preprocess"
+OUTFILE="outputs/latency_results"
 
-# Ciclo para cada modelo
-for model in "${models[@]}"
-do
-  # Ciclo para cada tamaño de batch
-  for batch_size in "${batch_sizes[@]}"
-  do
-    echo "Ejecutando modelo $model con batch size $batch_size"
-    python eval.py --weights weights/$model.pth --model $model --dataset datasets/img_preprocess --latency --batch_size $batch_size
-  done
+# Solo 3 modelos a ejecutar
+MODEL_TRT_UNET="unet_fp16.engine"
+MODEL_PT_BASE="attunet.pth"
+MODEL_TRT_ATT="attunet_fp16.engine"
+
+echo "===== Latency & Throughput Test (FP16 & Base) =====" > $OUTFILE
+echo "Dataset: $DATASET" >> $OUTFILE
+echo "Fecha ejecución: $(date)" >> $OUTFILE
+echo "-----------------------------------------------" >> $OUTFILE
+
+# ---- U-Net FP16 (TensorRT) ----
+for B in "${BATCHES[@]}"; do
+  echo "[TRT-FP16] Engine $MODEL_TRT_UNET — batch $B" | tee -a $OUTFILE
+  python3 eval.py --weights weights/$MODEL_TRT_UNET --model tensorrt --dataset $DATASET --latency --batch_size $B 2>&1 | tee -a $OUTFILE
+  python3 - <<EOF
+import torch; torch.cuda.empty_cache()
+EOF
+  echo "-----------------------------------------------" >> $OUTFILE
 done
 
-models=("unet_fp16" "attunet_fp16")
-# Ciclo para cada modelo
-for model in "${models[@]}"
-do
-  # Ciclo para cada tamaño de batch
-  for batch_size in "${batch_sizes[@]}"
-  do
-    echo "Ejecutando modelo $model con batch size $batch_size"
-    python eval.py --weights weights/$model.engine --model tensorrt --dataset datasets/img_preprocess --latency --batch_size $batch_size
-  done
+# ---- Attention U-Net Base (PyTorch) ----
+for B in "${BATCHES[@]}"; do
+  echo "[BASE] Modelo $MODEL_PT_BASE — batch $B" | tee -a $OUTFILE
+  python3 eval.py --weights weights/$MODEL_PT_BASE --model attunet --dataset $DATASET --latency --batch_size $B 2>&1 | tee -a $OUTFILE
+  python3 - <<EOF
+import torch; torch.cuda.empty_cache()
+EOF
+  echo "-----------------------------------------------" >> $OUTFILE
 done
 
-echo "Proceso completado."
+# ---- Attention U-Net FP16 (TensorRT) ----
+for B in "${BATCHES[@]}"; do
+  echo "[TRT-FP16] Engine $MODEL_TRT_ATT — batch $B" | tee -a $OUTFILE
+  python3 eval.py --weights weights/$MODEL_TRT_ATT --model tensorrt --dataset $DATASET --latency --batch_size $B 2>&1 | tee -a $OUTFILE
+  python3 - <<EOF
+import torch; torch.cuda.empty_cache()
+EOF
+  echo "-----------------------------------------------" >> $OUTFILE
+done
+
+echo "Pruebas guardadas en $OUTFILE"

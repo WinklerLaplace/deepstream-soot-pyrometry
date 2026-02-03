@@ -1,8 +1,10 @@
 datasets/*
 env/*
+.venv/*
 weights/*
 results/*
 imgs_experimentales/*
 cache/*
 __pycache__/
 outputs/*
+utils/librdkafka/

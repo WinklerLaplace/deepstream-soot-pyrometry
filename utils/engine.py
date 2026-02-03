@@ -136,7 +136,10 @@ class EngineBuilder:
         config.add_optimization_profile(profile)
 
         # builder configuration: max_workspace_size limits the amount of memory that any layer in the model can use, set to total device memory
-        config.max_workspace_size = torch.cuda.get_device_properties(self.device).total_memory
+        #config.max_workspace_size = torch.cuda.get_device_properties(self.device).total_memory
+        total = torch.cuda.get_device_properties(self.device).total_memory
+        workspace_bytes = int(total * 0.9)
+        config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, workspace_bytes)
         
         # builder configuration: builder_optimization_level he builder optimization level which TensorRT should build the engine at. Setting a higher optimization level allows TensorRT to spend longer engine building time searching for more optimization options. The resulting engine may have better performance compared to an engine built with a lower optimization level. The default optimization level is 3. Valid values include integers from 0 to the maximum optimization level, which is currently 5. Setting it to be greater than the maximum level results in identical behavior to the maximum level.
         config.builder_optimization_level = build_op_lvl
@@ -175,15 +178,19 @@ class EngineBuilder:
     
         #self.weight = self.checkpoint.with_suffix('.engine')
         self.weight = self.checkpoint.with_name(engine_name)
-
         if with_profiling:
-            config.profiling_verbosity = trt.ProfilingVerbosity.DETAILED
-        with self.builder.build_engine(self.network, config) as engine:
-            # Engine serialization to save it in a plan (.engine)
-            self.weight.write_bytes(engine.serialize())
+           config.profiling_verbosity = trt.ProfilingVerbosity.DETAILED
+        serialized_network = self.builder.build_serialized_network(self.network, config)
+		# Write the serialized network to the file
+        with open(self.weight.absolute(), "wb") as f:
+           f.write(serialized_network)
+		# Log the completion of the build process
         self.logger.log(
-            trt.Logger.WARNING, f'Build tensorrt engine finish.\n'
-            f'Save in {str(self.weight.absolute())}')
+			trt.Logger.WARNING, f'Build TensorRT engine finished.\n'
+			f'Saved in {str(self.weight.absolute())}'
+		)
+
+
 
     def build(self,
               fp32: bool = True,
@@ -262,62 +269,86 @@ class TRTModule(torch.nn.Module):
 
     def __init_engine(self) -> None:
         logger = trt.Logger(trt.Logger.WARNING)
-        trt.init_libnvinfer_plugins(logger, namespace='')
+        trt.init_libnvinfer_plugins(logger, namespace="")
+
         with trt.Runtime(logger) as runtime:
-            model = runtime.deserialize_cuda_engine(self.weight.read_bytes())
+            engine = runtime.deserialize_cuda_engine(self.weight.read_bytes())
 
-        context = model.create_execution_context()
-        num_bindings = model.num_bindings
-        names = [model.get_binding_name(i) for i in range(num_bindings)]
+        context = engine.create_execution_context()
 
-        self.bindings: List[int] = [0] * num_bindings
-        num_inputs, num_outputs = 0, 0
+        # API moderna
+        num_tensors = engine.num_io_tensors  # total I/O
+        input_names, output_names = [], []
 
-        for i in range(num_bindings):
-            if model.binding_is_input(i):
-                num_inputs += 1
+        for i in range(num_tensors):
+            tensor_name = engine.get_tensor_name(i)
+            mode = engine.get_tensor_mode(tensor_name)
+
+            if mode == trt.TensorIOMode.INPUT:
+                input_names.append(tensor_name)
             else:
-                num_outputs += 1
+                output_names.append(tensor_name)
 
-        self.num_bindings = num_bindings
-        self.num_inputs = num_inputs
-        self.num_outputs = num_outputs
-        self.model = model
+        # Guardar atributos
+        self.num_bindings = num_tensors
+        self.num_inputs = len(input_names)
+        self.num_outputs = len(output_names)
+        self.model = engine
         self.context = context
-        self.input_names = names[:num_inputs]
-        self.output_names = names[num_inputs:]
+        self.input_names = input_names
+        self.output_names = output_names
         self.idx = list(range(self.num_outputs))
 
+        # Si luego asignas memoria para inferencia, esto se mantiene
+        self.bindings: List[int] = [0] * num_tensors
+
+
+
     def __init_bindings(self) -> None:
-        idynamic = odynamic = False
-        Tensor = namedtuple('Tensor', ('name', 'dtype', 'shape'))
+        from collections import namedtuple
+        TensorInfo = namedtuple('TensorInfo', ('name', 'dtype', 'shape'))
+
+        idynamic = False
+        odynamic = False
         inp_info = []
         out_info = []
-        for i, name in enumerate(self.input_names):
-            assert self.model.get_binding_name(i) == name
-            dtype = self.dtypeMapping[self.model.get_binding_dtype(i)]
-            shape = tuple(self.model.get_binding_shape(i))
-            if -1 in shape:
-                idynamic |= True
-            inp_info.append(Tensor(name, dtype, shape))
-        for i, name in enumerate(self.output_names):
-            i += self.num_inputs
-            assert self.model.get_binding_name(i) == name
-            dtype = self.dtypeMapping[self.model.get_binding_dtype(i)]
-            shape = tuple(self.model.get_binding_shape(i))
-            if -1 in shape:
-                odynamic |= True
-            out_info.append(Tensor(name, dtype, shape))
 
+        num_tensors = self.model.num_io_tensors
+
+        # Recorrer tensores de entrada
+        for i in range(num_tensors):
+            name = self.model.get_tensor_name(i)
+            mode = self.model.get_tensor_mode(name)
+            shape = tuple(self.model.get_tensor_shape(name))
+            dtype = self.dtypeMapping[self.model.get_tensor_dtype(name)]
+
+            if mode == trt.TensorIOMode.INPUT:
+                if -1 in shape:
+                    idynamic = True
+                inp_info.append(TensorInfo(name, dtype, shape))
+
+            # Recorrer tensores de salida
+            elif mode == trt.TensorIOMode.OUTPUT:
+                if -1 in shape:
+                    odynamic = True
+                out_info.append(TensorInfo(name, dtype, shape))
+
+        # Si las salidas NO son dinámicas, pre-alocar tensores torch para reutilización
         if not odynamic:
             self.output_tensor = [
                 torch.empty(info.shape, dtype=info.dtype, device=self.device)
                 for info in out_info
             ]
+
+        # Guardar atributos en la clase
+        self.num_bindings = num_tensors
+        self.num_inputs = len(inp_info)
+        self.num_outputs = len(out_info)
         self.idynamic = idynamic
         self.odynamic = odynamic
         self.inp_info = inp_info
         self.out_info = out_info
+
 
     def set_profiler(self, profiler: Optional[trt.IProfiler]):
         self.context.profiler = profiler \
@@ -329,37 +360,28 @@ class TRTModule(torch.nn.Module):
             self.idx = [self.output_names.index(i) for i in desired]
 
     def forward(self, *inputs) -> Union[Tuple, torch.Tensor]:
-
         assert len(inputs) == self.num_inputs
-        contiguous_inputs: List[torch.Tensor] = [
-            i.contiguous() for i in inputs
-        ]
 
-        for i in range(self.num_inputs):
-            self.bindings[i] = contiguous_inputs[i].data_ptr()
-            if self.idynamic:
-                self.context.set_binding_shape(
-                    i, tuple(contiguous_inputs[i].shape))
+        # 1) Tensor de entrada en GPU
+        input_tensor = inputs[0].contiguous().to(self.device)
 
+        # En TRT 10.3, la entrada también se asigna con set_tensor_address
+        self.context.set_tensor_address("images", input_tensor.data_ptr())
+
+        # 2) Crear tensores de salida en GPU y asignar direcciones
         outputs: List[torch.Tensor] = []
+        for info in self.out_info:
+            out = torch.empty(info.shape, dtype=info.dtype, device=self.device)
+            self.context.set_tensor_address(info.name, out.data_ptr())
+            outputs.append(out)
 
-        for i in range(self.num_outputs):
-            j = i + self.num_inputs
-            if self.odynamic:
-                shape = tuple(self.context.get_binding_shape(j))
-                output = torch.empty(size=shape,
-                                     dtype=self.out_info[i].dtype,
-                                     device=self.device)
-            else:
-                output = self.output_tensor[i]
-            self.bindings[j] = output.data_ptr()
-            outputs.append(output)
-
-        self.context.execute_async_v2(self.bindings, self.stream.cuda_stream)
+        # 3) Ejecutar inferencia
+        self.context.execute_async_v3(self.stream.cuda_stream)
         self.stream.synchronize()
 
-        return tuple(outputs[i]
-                     for i in self.idx) if len(outputs) > 1 else outputs[0]
+        # 4) Retornar resultado
+        return tuple(outputs[i] for i in self.idx) if len(outputs) > 1 else outputs[0]
+
 
 class TRTProfilerV1(trt.IProfiler):
 

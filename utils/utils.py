@@ -80,9 +80,11 @@ def get_parameters_vanilla(model):
 def get_layers(model_name, model_path):
     # para que funcione como sudo es necesario correr desde el path del enviroment env/bin/polygraphy
     if model_name == 'tensorrt':
-        cmd = f"env/bin/polygraphy inspect model {model_path}"
+        # cmd = f"env/bin/polygraphy inspect model {model_path}"
+        cmd = f"polygraphy inspect model {model_path}"
     else:
-        cmd = f"env/bin/polygraphy inspect model {(model_path).replace('.engine', '.onnx')} --display-as=trt"
+        # cmd = f"env/bin/polygraphy inspect model {(model_path).replace('.engine', '.onnx')} --display-as=trt"
+        cmd = f"polygraphy inspect model {(model_path).replace('.engine', '.onnx')} --display-as=trt"
 
     # Ejecuta el comando y captura la salida
     import subprocess
@@ -104,24 +106,24 @@ def get_layers(model_name, model_path):
         return 0
 
 def get_parametros(model_type, model_path):
+    import subprocess
+    import re
+
     if model_type == 'tensorrt':
-        cmd = f"env/bin/python utils/param_counter.py --engine ../{model_path}"
+        cmd = f"python utils/param_counter.py --engine {model_path}"
     else:
-        cmd = f"env/bin/onnx_opcounter {(model_path).replace('.engine', '.onnx')}"
+        onnx_path = model_path.replace('.engine', '.onnx')
+        cmd = f"onnx_opcounter {onnx_path}"
 
     process = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     stdout, stderr = process.communicate()
-
-    # Decodifica la salida a texto
     output = stdout.decode()
-
-    # Usa una expresión regular para encontrar el número de capas
-    match = re.search(r"Number of parameters in the model: (\d+)", output)
+    
+    match = re.search(r"parameters.*?(\d+)", output)
     if match:
-        num_parameters = int(match.group(1))
-        return num_parameters
+        return int(match.group(1))
     else:
-        print("No se encontró el número de parametros")
+        print("No se encontró el número de parámetros")
         return 0
 
 def load_model(opt,model_name, weight):
@@ -134,11 +136,10 @@ def load_model(opt,model_name, weight):
         engine_path = os.path.join(parent_directory, weight)
         model = engine.TRTModule(engine_path, device)
         model.set_desired(['outputs'])    
-        
         print("# capas onnx = ",get_layers(model_name,weight))
         print("# parametro onnx = ",get_parametros(model_name,weight))
     elif model_name == 'unet' or model_name == 'attunet':
-        model = torch.load(weight)
+        model = torch.load(weight, weights_only = False)
         model.to(device)
         model.eval()
         print("# capas base = ", get_parameters_vanilla(model)[0])
@@ -198,7 +199,7 @@ def process_experimental_input(opt,image_dir):
     return Py_exp_interp
 
 def process_condA(image_dir):
-    NPY_DIR2 = 'datasets/npy-PS44'
+    NPY_DIR2 = 'datasets/dataset-combustion/npy-PS44'
     INPUT_1 = 'R'
     INPUT_2 = 'G'
     INPUT_3 = 'B'

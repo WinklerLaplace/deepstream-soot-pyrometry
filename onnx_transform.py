@@ -20,7 +20,7 @@ def main(opt):
     weights_path = opt.weights
     weights_path = os.path.join(current_directory,weights_path)
 
-    model = torch.load(weights_path)
+    model = torch.load(weights_path, weights_only = False)
     model.to(device)
     model.eval()
     

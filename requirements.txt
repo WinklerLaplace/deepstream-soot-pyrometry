@@ -1,19 +1,147 @@
-torch==2.3.0
-torchvision==0.18
-tensorrt==8.6.1.post1
---extra-index-url https://pypi.nvidia.com tensorrt-bindings==8.6.1
---extra-index-url https://pypi.nvidia.com tensorrt-libs==8.6.1
+# ==========================================================
+# Proyecto: Pirometría del hollín en llamas laminares con cámaras RGB y redes neuronales optimizadas
+# Plataforma principal: NVIDIA Jetson AGX Orin 64GB (Linux)
+# Python objetivo: 3.10.x
+# ==========================================================
+#
+# Este archivo cumple dos roles:
+#  1) Definir dependencias Python instalables vía pip
+#  2) Guiar la instalación del entorno completo (GPU + NVIDIA Stack)
+#
+# ==========================================================
+# 1. PYTHON
+# ==========================================================
+#
+# Python 3.10.x es requerido.
+#
+# En Jetson (Ubuntu):
+#   sudo apt install python3.10 python3.10-venv python3-pip
+#
+# En Windows (x86):
+#   Descargar e instalar manualmente:
+#   https://www.python.org/ftp/python/3.10.11/python-3.10.11-amd64.exe
+#
+# Verificar:
+#   python --version
+#
+
+# ==========================================================
+# 2. NVIDIA STACK (CUDA / cuDNN / TensorRT)
+# ==========================================================
+#
+# --------------------------
+# CASO A: Jetson
+# --------------------------
+#
+# No instalar CUDA, cuDNN ni TensorRT manualmente.
+# Todo el stack viene incluido con JetPack.
+#
+# JetPack validado:
+#   JetPack 36.4.7 (R36)
+#
+# Versiones resultantes:
+#   CUDA:        12.6
+#   cuDNN:        9.3.0
+#   TensorRT:    10.3.0
+#
+# Instalación típica:
+#   - Flashear Jetson con SDK Manager
+#   - O instalar vía APT si el sistema ya está flasheado
+#
+# Verificación:
+#   nvcc --version
+#   python -c "import tensorrt as trt; print(trt.__version__)"
+#
+# --------------------------
+# CASO B: x86 / Windows / Linux genérico
+# --------------------------
+#
+# En este caso, el stack NVIDIA debe instalarse MANUALMENTE
+# y respetando la matriz de compatibilidad.
+#
+# 1) CUDA Toolkit:
+#    https://developer.nvidia.com/cuda-13-0-0-download-archive
+#
+# 2) cuDNN:
+#    https://developer.nvidia.com/rdp/cudnn-archive
+#
+# 3) TensorRT:
+#    https://developer.nvidia.com/tensorrt/download/10x
+#
+# 4) Ver compatibilidad:
+#    https://docs.nvidia.com/deeplearning/tensorrt/latest/getting-started/support-matrix.html
+#
+# NOTA:
+# - CUDA, cuDNN y TensorRT deben coincidir entre sí
+# - PyTorch debe ser compatible con esa versión de CUDA
+#
+
+# ==========================================================
+# 3. PYTORCH
+# ==========================================================
+#
+# En Jetson:
+#   Instalar PyTorch desde los wheels de NVIDIA:
+#   https://docs.nvidia.com/deeplearning/frameworks/install-pytorch-jetson-platform
+#
+# En x86:
+#   Usar el selector oficial:
+#   https://pytorch.org/get-started/locally/
+#
+torch==2.8.0
+torchvision==0.23.0
+torch-tensorrt==2.8.0
+
+# ==========================================================
+# 4. DEPENDENCIAS PYTHON (pip)
+# ==========================================================
+#
+# Estas dependencias son comunes a todos los entornos.
+#
+numpy==1.24.0
 scipy==1.13.0
-random2
-numpy
-matplotlib
-pandas
-scikit-learn
-tqdm==4.66.1
-torchsummary
-onnx==1.16.0
-opencv-python
+pandas==1.3.5
+scikit-learn==1.7.2
+matplotlib==3.5.1
+tqdm==4.67.1
+tabulate==0.9.0
+
+# ==========================================================
+# 5. COMPUTER VISION
+# ==========================================================
+#
+# OpenCV:
+#
+# En Jetson:
+#   NO instalar OpenCV vía pip.
+#   Usar la versión del sistema para asegurar:
+#     - Soporte GStreamer
+#     - Integración con NVMM / cámaras
+#     - Compatibilidad con DeepStream
+#
+#   Instalación:
+#     sudo apt install python3-opencv
+#
+# En x86 / entornos sin Jetson:
+#   Puede instalarse vía pip si no se requiere CUDA/GStreamer.
+#
+#   Ejemplo:
+#     pip install opencv-python==4.12.0.88
+#
+#   (No incluido aquí para evitar sobrescritura accidental en Jetson)
+#
+Pillow==9.0.1
+
+# ==========================================================
+# 6. ONNX / OPTIMIZACIÓN / ANÁLISIS
+# ==========================================================
+#
+onnx==1.19.1
+onnxruntime==1.23.2
 polygraphy==0.49.0
 onnx_opcounter
-onnxruntime
-tabulate==0.9.0
+
+# ==========================================================
+# 7. UTILIDADES
+# ==========================================================
+torchsummary
