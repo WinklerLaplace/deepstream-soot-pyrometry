@@ -1,30 +1,63 @@
 #!/bin/bash
 
-OUTDIR="outputs/accuracy_results"
+DATASET="datasets/data_experimental"
+OUTDIR="outputs"
+OUTFILE="$OUTDIR/accuracy_results.txt"
+
 CASES=("A" "B" "C")
+
 mkdir -p "$OUTDIR"
 
-declare -A MODELS=(
-  ["unet_base"]="--weights weights/unet.pth --model unet --dataset datasets/data_experimental --experiment"
-  ["unet_fp32"]="--weights weights/unet_fp32.engine --model tensorrt --dataset datasets/data_experimental --experiment"
-  ["unet_fp16"]="--weights weights/unet_fp16.engine --model tensorrt --dataset datasets/data_experimental --experiment"
-  ["unet_int8"]="--weights weights/unet_int8.engine --model tensorrt --dataset datasets/data_experimental --experiment"
-  ["attunet_base"]="--weights weights/attunet.pth --model attunet --dataset datasets/data_experimental --experiment"
-  ["attunet_fp32"]="--weights weights/attunet_fp32.engine --model tensorrt --dataset datasets/data_experimental --experiment"
-  ["attunet_fp16"]="--weights weights/attunet_fp16.engine --model tensorrt --dataset datasets/data_experimental --experiment"
-  ["attunet_int8"]="--weights weights/attunet_int8.engine --model tensorrt --dataset datasets/data_experimental --experiment"
-)
+echo "===== ACCURACY / PRECISION TEST =====" > "$OUTFILE"
+echo "Dataset: $DATASET" >> "$OUTFILE"
+echo "Casos: ${CASES[@]}" >> "$OUTFILE"
+echo "Fecha ejecución: $(date)" >> "$OUTFILE"
+echo "=================================================" >> "$OUTFILE"
+
+run_test () {
+
+    NAME=$1
+    WEIGHTS=$2
+    MODEL_TYPE=$3
+    CASE=$4
+
+    echo "" | tee -a "$OUTFILE"
+    echo "[MODEL: $NAME | CASE: $CASE]" | tee -a "$OUTFILE"
+
+    python3 eval.py \
+        --weights "weights/$WEIGHTS" \
+        --model "$MODEL_TYPE" \
+        --experiment \
+        --case "$CASE" \
+        2>&1 | tee -a "$OUTFILE"
+
+    echo "-----------------------------------------------" >> "$OUTFILE"
+}
+
+# =========================
+#  EJECUCIÓN
+# =========================
 
 for CASE in "${CASES[@]}"; do
-  for NAME in "${!MODELS[@]}"; do
-    OUTFILE="$OUTDIR/${CASE}_${NAME}.log"
-    echo "=== Evaluando $NAME (case $CASE) ==="
-    CMD="python3 eval.py ${MODELS[$NAME]} --case $CASE 2>&1 | tee -a $OUTFILE"
-    echo "Ejecutando: $CMD"
-    eval $CMD
-    echo "Guardado en: $OUTFILE"
-    echo ""
-  done
+
+    echo "" | tee -a "$OUTFILE"
+    echo "#################### CASE $CASE ####################" | tee -a "$OUTFILE"
+
+    # U-Net
+    run_test "U-Net PyTorch Base" "unet.pth" "unet" "$CASE"
+    # run_test "U-Net TensorRT FP32" "unet_fp32.engine" "tensorrt" "$CASE"
+    # run_test "U-Net TensorRT FP16" "unet_fp16.engine" "tensorrt" "$CASE"
+    # run_test "U-Net TensorRT INT8" "unet_int8.engine" "tensorrt" "$CASE"
+
+    # Attention U-Net
+    run_test "Attention U-Net PyTorch Base" "attunet.pth" "attunet" "$CASE"
+    # run_test "Attention U-Net TensorRT FP32" "attunet_fp32.engine" "tensorrt" "$CASE"
+    # run_test "Attention U-Net TensorRT FP16" "attunet_fp16.engine" "tensorrt" "$CASE"
+    # run_test "Attention U-Net TensorRT INT8" "attunet_int8.engine" "tensorrt" "$CASE"
+
 done
 
-echo "Evaluación terminada para todos los modelos en los casos A, B y C."
+echo "" >> "$OUTFILE"
+echo "Fin: $(date)" >> "$OUTFILE"
+
+echo "Resultados guardados en: $OUTFILE"

@@ -1,0 +1,17 @@
+[property]
+gpu-id=0
+model-engine-file=/home/shannon/Documents/flame/UNetTRT/weights/unet_fp16.engine
+
+network-type=100
+infer-dims=3;128;32
+model-color-format=0
+batch-size=1
+network-mode=2
+
+net-scale-factor=1.0
+offsets=0;0;0
+
+output-blob-names=outputs
+
+process-mode=1
+cluster-mode=0

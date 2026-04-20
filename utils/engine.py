@@ -18,10 +18,10 @@ import sys
 import random
 
 try:
-    from processing import process_llamas as preprocessing # preprocess_juanjo # recuerda cambiar a esta funcion de pre procesamiento para los experimentos de juanjo
+    from processing import process_llamas_image as preprocessing # preprocess_juanjo # recuerda cambiar a esta funcion de pre procesamiento para los experimentos de juanjo
 except ImportError:
     try:
-        from utils.processing import process_llamas as preprocessing # preprocess_juanjo #
+        from utils.processing import process_llamas_image as preprocessing # preprocess_juanjo #
     except ImportError:
         print("No se pudo importar el módulo de procesamiento.")
 
@@ -358,7 +358,7 @@ class TRTModule(torch.nn.Module):
         if isinstance(desired,
                       (list, tuple)) and len(desired) == self.num_outputs:
             self.idx = [self.output_names.index(i) for i in desired]
-
+    '''
     def forward(self, *inputs) -> Union[Tuple, torch.Tensor]:
         assert len(inputs) == self.num_inputs
 
@@ -381,6 +381,29 @@ class TRTModule(torch.nn.Module):
 
         # 4) Retornar resultado
         return tuple(outputs[i] for i in self.idx) if len(outputs) > 1 else outputs[0]
+    '''
+    def forward(self, *inputs):
+
+        assert len(inputs) == self.num_inputs
+
+        input_tensor = inputs[0].contiguous().to(self.device)
+        self.context.set_tensor_address("images", input_tensor.data_ptr())
+
+        outputs = []
+
+        for i, info in enumerate(self.out_info):
+
+            # reutilizar buffer prealocado
+            out = self.output_tensor[i]
+
+            self.context.set_tensor_address(info.name, out.data_ptr())
+            outputs.append(out)
+
+        self.context.execute_async_v3(self.stream.cuda_stream)
+        self.stream.synchronize()
+
+        return tuple(outputs[i] for i in self.idx) if len(outputs) > 1 else outputs[0]
+
 
 
 class TRTProfilerV1(trt.IProfiler):
