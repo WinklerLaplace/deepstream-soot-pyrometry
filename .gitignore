@@ -8,5 +8,5 @@ cache/*
 __pycache__/
 outputs/*
 utils/librdkafka/
-datasets/*.so
-datasets/*.o
+deepstream/*.so
+deepstream/*.o
