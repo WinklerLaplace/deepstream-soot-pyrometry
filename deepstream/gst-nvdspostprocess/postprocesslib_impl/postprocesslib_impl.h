@@ -26,6 +26,8 @@
 
 #include <cuda.h>
 #include <cuda_runtime.h>
+#include <opencv2/opencv.hpp>
+
 #include "post_processor.h"
 #include "post_processor_classify.h"
 #include "post_processor_detect.h"
@@ -65,45 +67,49 @@ public:
       m_cudaStream = 0;
       m_preprocessor_support = FALSE;
     }
+
     m_initParams.preprocessor_support = FALSE;
     m_outputThread = new std::thread(&PostProcessAlgorithm::OutputThread, this);
     m_initParams.uniqueID = 0;
     m_initParams.maxBatchSize = 1;
 
-    std::memset(m_initParams.labelsFilePath,0, sizeof(m_initParams.labelsFilePath));
-    m_initParams.networkType = NvDsPostProcessNetworkType_Other;
-    std::memset(m_initParams.customClassifierParseFuncName, 0,
-        sizeof(m_initParams.customClassifierParseFuncName)-1);
-    std::memset(m_initParams.customBBoxParseFuncName, 0,
-        sizeof(m_initParams.customBBoxParseFuncName)-1);
-    std::memset(m_initParams.customBBoxInstanceMaskParseFuncName, 0,
-        sizeof(m_initParams.customBBoxInstanceMaskParseFuncName)-1);
+    std::memset(m_initParams.labelsFilePath, 0,
+        sizeof(m_initParams.labelsFilePath));
 
+    m_initParams.networkType = NvDsPostProcessNetworkType_Other;
+
+    std::memset(m_initParams.customClassifierParseFuncName, 0,
+        sizeof(m_initParams.customClassifierParseFuncName) - 1);
+
+    std::memset(m_initParams.customBBoxParseFuncName, 0,
+        sizeof(m_initParams.customBBoxParseFuncName) - 1);
+
+    std::memset(m_initParams.customBBoxInstanceMaskParseFuncName, 0,
+        sizeof(m_initParams.customBBoxInstanceMaskParseFuncName) - 1);
 
     /** Holds the number of classes detected by a detector network. */
     m_initParams.numDetectedClasses = 0;
 
-    /** Holds per-class detection parameters. The array's size must be equal
-     to @a numDetectedClasses. */
+    /** Holds per-class detection parameters. */
     m_initParams.perClassDetectionParams = NULL;
 
-    /** Holds the minimum confidence threshold for the classifier to consider
-     a label valid. */
+    /** Holds the minimum confidence threshold for classifier. */
     m_initParams.classifierThreshold = 0.5;
 
     m_initParams.segmentationThreshold = 0.5;
 
-    /** Holds a pointer to an array of pointers to output layer names. */
+    /** Holds a pointer to output layer names. */
     m_initParams.outputLayerNames = NULL;
+
     /** Holds the number of output layer names. */
     m_initParams.numOutputLayers = 0;
 
-    /** Holds the ID of the GPU which is to run the inference. */
+    /** GPU id */
     m_initParams.gpuID = 0;
 
     m_initParams.inferInputDims = {0,0,0};
 
-    /** Holds the type of clustering mode */
+    /** Clustering mode */
     m_initParams.clusterMode = NVDSPOSTPROCESS_CLUSTER_NMS;
 
     m_initParams.classifier_type = NULL;
@@ -122,8 +128,9 @@ public:
 
   std::set<gint> SplitStringInt (std::string input);
 
-  bool GetAbsFilePath (const gchar * cfg_file_path, const gchar * file_path,
-    char *abs_path_str);
+  bool GetAbsFilePath (const gchar * cfg_file_path,
+                       const gchar * file_path,
+                       char *abs_path_str);
 
   gboolean hw_caps;
 
@@ -131,17 +138,35 @@ public:
   ~PostProcessAlgorithm();
 
 private:
+
   /* Helper Function to Extract Batch Meta from buffer */
   NvDsBatchMeta * GetNVDS_BatchMeta (GstBuffer *buffer);
 
-  /* Output Processing Thread, push buffer to downstream  */
+  /* Output Processing Thread */
   void OutputThread(void);
 
   /* Helper function to Dump NvBufSurface RAW content */
-  void DumpNvBufSurface (NvBufSurface *in_surface, NvDsBatchMeta *batch_meta);
+  void DumpNvBufSurface (NvBufSurface *in_surface,
+                         NvDsBatchMeta *batch_meta);
+
+  /* custom: render tensor to frame */
+  void RenderThermalOutput(
+      NvBufSurface *surf,
+      guint batch_id,
+      NvDsInferTensorMeta *meta,
+      NvDsFrameMeta *frame_meta);
+
+
+
+
 
   bool ParseLabelsFile(const std::string& labelsFilePath);
-  bool ParseConfAttr (YAML::Node node, gint64 class_id, NvDsPostProcessDetectionParams& params);
+
+  bool ParseConfAttr(
+      YAML::Node node,
+      gint64 class_id,
+      NvDsPostProcessDetectionParams& params);
+
   NvDsPostProcessStatus preparePostProcess();
 
   NvDsPostProcessNetworkType m_networkType;
@@ -155,20 +180,29 @@ private:
   gboolean m_releaseTensorMeta = FALSE;
   gboolean m_outputInstanceMask = FALSE;
   gboolean m_preprocessor_support = FALSE;
+
   std::string m_classifierType;
-  std::set <gint> m_filterOutClassIds;
-  std::set <gint> m_operateOnClassIds;
-  std::vector <std::string> m_outputBlobNames;
+
+  std::set<gint> m_filterOutClassIds;
+  std::set<gint> m_operateOnClassIds;
+  std::vector<std::string> m_outputBlobNames;
 
   std::vector<NvDsPostProcessInstanceMaskInfo> m_InstanceMaskList;
-  std::unordered_map <gint, NvDsPostProcessDetectionParams> m_detectorClassAttr;
-  /* Vector of NvDsPostProcessInstanceMaskInfo vectors for each class. */
-  std::vector<std::vector<NvDsPostProcessInstanceMaskInfo>> m_PerClassInstanceMaskList;
+
+  std::unordered_map<gint,
+      NvDsPostProcessDetectionParams> m_detectorClassAttr;
+
+  std::vector<std::vector<NvDsPostProcessInstanceMaskInfo>>
+      m_PerClassInstanceMaskList;
+
   std::vector<std::vector<std::string>> m_Labels;
 
   std::unique_ptr<ModelPostProcessor> m_Postprocessor;
+
   NvDsPostProcessContextInitParams m_initParams;
+
 public:
+
   guint source_id = 0;
   guint m_frameNum = 0;
   bool outputthread_stopped = false;
@@ -180,16 +214,15 @@ public:
   std::queue<PacketInfo> m_processQ;
   std::mutex m_processLock;
   std::condition_variable m_processCV;
-  /* Aysnc Stop Handling */
+
+  /* Async Stop Handling */
   gboolean m_stop = FALSE;
 
   /* Vector Containing Key:Value Pair of Custom Lib Properties */
   std::vector<Property> m_vectorProperty;
-
 };
 
-extern "C" IDSPostProcessLibrary *CreateCustomAlgoCtx(DSPostProcess_CreateParams *params);
-// Create Custom Algorithm / Library Context
-
+extern "C" IDSPostProcessLibrary *
+CreateCustomAlgoCtx(DSPostProcess_CreateParams *params);
 
 #endif

@@ -42,17 +42,25 @@ batch-size=1
 input-tensor-meta=1
 config-file=/home/shannon/Documents/flame/UNetTRT/deepstream/config_infer_primary.txt
 
+[post-process0]
+enable=1
+config-file=/home/shannon/Documents/flame/UNetTRT/deepstream/config_postprocess.txt
+
 [osd]
-enable=0
+enable=1
 gpu-id=0
 nvbuf-memory-type=0
 
 [sink0]
 enable=1
-type=1
+type=3
 sync=0
 gpu-id=0
 nvbuf-memory-type=0
+container=1
+codec=1
+bitrate=4000000
+output-file=/home/shannon/Documents/flame/UNetTRT/outputs/output_postprocess.mp4
 
 [tests]
 file-loop=0

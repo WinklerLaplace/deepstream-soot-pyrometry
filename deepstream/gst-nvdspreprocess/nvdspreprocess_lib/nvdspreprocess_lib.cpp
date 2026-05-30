@@ -28,6 +28,15 @@
 #include <opencv2/opencv.hpp>
 #include <opencv2/imgcodecs.hpp>
 
+extern "C"
+void launch_normalize(float* data,
+                     int C, int H, int W,
+                     float inv_xmax,
+                     const float* means,
+                     const float* stds);
+                     
+static CustomCtx *g_ctx = nullptr;
+
 struct CustomCtx
 {
   /** Custom initialization parameters */
@@ -36,6 +45,9 @@ struct CustomCtx
   CustomMeanSubandNormParams custom_mean_norm_params;
   /** unique pointer to tensor_impl class instance */
   std::unique_ptr <NvDsPreProcessTensorImpl> tensor_impl;
+
+  NvBufSurface *prealloc_crop_surf = nullptr;  // 2048×150 NV12
+  NvBufSurface *prealloc_rot_surf  = nullptr;  // 150×2048 NV12
 };
 
 /* Get the absolute path of a file mentioned in the config given a
@@ -92,55 +104,27 @@ get_absolute_file_path (
 }
 
 NvDsPreProcessStatus
-CustomTensorPreparation(CustomCtx *ctx, NvDsPreProcessBatch *batch, NvDsPreProcessCustomBuf *&buf,
-                        CustomTensorParams &tensorParam, NvDsPreProcessAcquirer *acquirer)
+CustomTensorPreparation(CustomCtx* ctx, NvDsPreProcessBatch* batch,
+                        NvDsPreProcessCustomBuf*& buf,
+                        CustomTensorParams& tensorParam,
+                        NvDsPreProcessAcquirer* acquirer)
 {
-  NvDsPreProcessStatus status = NVDSPREPROCESS_TENSOR_NOT_READY;
+    buf = acquirer->acquire();
 
-  /** acquire a buffer from tensor pool */
-  buf = acquirer->acquire();
+    NvDsPreProcessUnit& unit = batch->units[0];
 
-  /** Prepare Tensor */
-  status = ctx->tensor_impl->prepare_tensor(batch, tensorParam, buf->memory_ptr);
-  if (status != NVDSPREPROCESS_SUCCESS) {
-    printf ("Custom Lib: Tensor Preparation failed\n");
-    acquirer->release(buf);
-  }
+    launch_preprocess(
+        reinterpret_cast<const unsigned char*>(unit.converted_frame_ptr),
+        reinterpret_cast<float*>(buf->memory_ptr),
+        128, 32,
+        static_cast<int>(batch->pitch));
 
-  /** synchronize cuda stream */
-  status = ctx->tensor_impl->syncStream();
-  if (status != NVDSPREPROCESS_SUCCESS) {
-    printf ("Custom Lib: Cuda Stream Synchronization failed\n");
-    acquirer->release(buf);
-  }
+    cudaDeviceSynchronize();
 
-  tensorParam.params.network_input_shape[0] = (int)batch->units.size();
+    tensorParam.params.network_input_shape[0] =
+        static_cast<int>(batch->units.size());
 
-  return status;
-}
-
-NvDsPreProcessStatus
-CustomTransformation(NvBufSurface *in_surf, NvBufSurface *out_surf, CustomTransformParams &params)
-{
-  NvBufSurfTransform_Error err;
-
-  err = NvBufSurfTransformSetSessionParams(&params.transform_config_params);
-  if (err != NvBufSurfTransformError_Success)
-  {
-      printf("NvBufSurfTransformSetSessionParams failed with error %d\n", err);
-      return NVDSPREPROCESS_CUSTOM_TRANSFORMATION_FAILED;
-  }
-
-  /* Batched tranformation. */
-  err = NvBufSurfTransform(in_surf, out_surf, &params.transform_params);
-
-  if (err != NvBufSurfTransformError_Success)
-  {
-      printf("NvBufSurfTransform failed with error %d\n", err);
-      return NVDSPREPROCESS_CUSTOM_TRANSFORMATION_FAILED;
-  }
-
-  return NVDSPREPROCESS_SUCCESS;
+    return NVDSPREPROCESS_SUCCESS;
 }
 
 NvDsPreProcessStatus
@@ -150,52 +134,60 @@ CustomAsyncTransformation(NvBufSurface *in_surf,
 {
     NvBufSurfTransform_Error err;
 
-    params.transform_config_params.compute_mode =
-        NvBufSurfTransformCompute_GPU;
+    params.transform_config_params.compute_mode = NvBufSurfTransformCompute_GPU;
+    params.transform_config_params.gpu_id       = 0;
+    params.transform_config_params.cuda_stream  = NULL;
 
-    params.transform_config_params.gpu_id = 0;
-
-    params.transform_config_params.cuda_stream = NULL;
-    
-    err = NvBufSurfTransformSetSessionParams(
-            &params.transform_config_params);
-
+    err = NvBufSurfTransformSetSessionParams(&params.transform_config_params);
     if (err != NvBufSurfTransformError_Success)
-    {
-        printf("SetSessionParams failed %d\n", err);
         return NVDSPREPROCESS_CUSTOM_TRANSFORMATION_FAILED;
-    }
 
-    // ==================================================
-    // FLAGS: crop + resize + rotate
-    // ==================================================
-    params.transform_params.transform_flag =
-          NVBUFSURF_TRANSFORM_CROP_SRC
-        | NVBUFSURF_TRANSFORM_FILTER
-        | NVBUFSURF_TRANSFORM_FLIP;
+    NvBufSurface *crop_surf = g_ctx->prealloc_crop_surf;
+    NvBufSurface *rot_surf  = g_ctx->prealloc_rot_surf;
 
-    // ==================================================
-    // ROTACION 90°
-    // ==================================================
-    params.transform_params.transform_flip =
-        NvBufSurfTransform_Rotate90;
+    // CROP
+    NvBufSurfTransformRect crop_src = {1061, 0, 2048, 150};
+    NvBufSurfTransformRect crop_dst = {0,   0, 2048, 150};
 
-    // Si quieres horario usar Rotate270 según orientación real
+    NvBufSurfTransformParams crop_params;
+    memset(&crop_params, 0, sizeof(crop_params));
+    crop_params.src_rect       = &crop_src;
+    crop_params.dst_rect       = &crop_dst;
+    crop_params.transform_flag = NVBUFSURF_TRANSFORM_CROP_SRC;
 
-    // ==================================================
-    // Ejecutar transform async
-    // ==================================================
-    err = NvBufSurfTransformAsync(
-            in_surf,
-            out_surf,
-            &params.transform_params,
-            &params.sync_obj);
-
+    err = NvBufSurfTransform(in_surf, crop_surf, &crop_params);
     if (err != NvBufSurfTransformError_Success)
-    {
-        printf("Transform failed %d\n", err);
         return NVDSPREPROCESS_CUSTOM_TRANSFORMATION_FAILED;
-    }
+
+    // ROTATE
+    NvBufSurfTransformRect rot_src = {0, 0, 2048, 150};
+    NvBufSurfTransformRect rot_dst = {0, 0, 150,  2048};
+
+    NvBufSurfTransformParams rot_params;
+    memset(&rot_params, 0, sizeof(rot_params));
+    rot_params.src_rect       = &rot_src;
+    rot_params.dst_rect       = &rot_dst;
+    rot_params.transform_flag = NVBUFSURF_TRANSFORM_FLIP;
+    rot_params.transform_flip = NvBufSurfTransform_Rotate90;
+
+    err = NvBufSurfTransform(crop_surf, rot_surf, &rot_params);
+    if (err != NvBufSurfTransformError_Success)
+        return NVDSPREPROCESS_CUSTOM_TRANSFORMATION_FAILED;
+
+    // RESIZE
+    NvBufSurfTransformRect resize_src = {0, 0, 150,  2048};
+    NvBufSurfTransformRect resize_dst = {0, 0, 32,   128};
+
+    params.transform_params.src_rect        = &resize_src;
+    params.transform_params.dst_rect        = &resize_dst;
+    params.transform_params.transform_flag  = NVBUFSURF_TRANSFORM_CROP_SRC
+                                            | NVBUFSURF_TRANSFORM_CROP_DST
+                                            | NVBUFSURF_TRANSFORM_FILTER;
+    params.transform_params.transform_filter = NvBufSurfTransformInter_Bilinear;
+
+    err = NvBufSurfTransform(rot_surf, out_surf, &params.transform_params);
+    if (err != NvBufSurfTransformError_Success)
+        return NVDSPREPROCESS_CUSTOM_TRANSFORMATION_FAILED;
 
     return NVDSPREPROCESS_SUCCESS;
 }
@@ -249,10 +241,55 @@ CustomCtx *initLib(CustomInitParams initparams)
 
   ctx->initParams = initparams;
 
+  // constantes de normalización 
+
+  static const float INV_XMAX = 1.0f / 2005.2559796039604f;
+  
+  static const float MEANS[3] = {
+      0.003930921760659862f,
+      0.019108146307200424f,
+      0.01762230914738107f
+  };
+  
+  static const float STDS[3] = {
+      0.01091675497061941f,
+      0.051508108170714f,
+      0.046621915109236536f
+  };
+  
+  init_preprocess_constants(INV_XMAX, MEANS, STDS);
+
+  // Preallocar superficies intermedias de transformación
+
+  NvBufSurfaceCreateParams p;
+  memset(&p, 0, sizeof(p));
+  p.gpuId = 0;
+  p.layout = NVBUF_LAYOUT_PITCH;
+  p.memType = NVBUF_MEM_CUDA_UNIFIED;
+  p.colorFormat = NVBUF_COLOR_FORMAT_NV12;  
+
+  p.width  = 2048; p.height = 150;
+  if (NvBufSurfaceCreate(&ctx->prealloc_crop_surf, 1, &p) != 0) {
+      printf("Failed to preallocate crop surface\n");
+      return nullptr;
+  }
+
+  p.width  = 150; p.height = 2048;
+  if (NvBufSurfaceCreate(&ctx->prealloc_rot_surf, 1, &p) != 0) {
+      NvBufSurfaceDestroy(ctx->prealloc_crop_surf);
+      printf("Failed to preallocate rot surface\n");
+      return nullptr;
+  }
+
+  g_ctx = ctx.get();
+
   return ctx.release();
 }
 
 void deInitLib(CustomCtx *ctx)
 {
+  g_ctx = nullptr;
+  if (ctx->prealloc_crop_surf) NvBufSurfaceDestroy(ctx->prealloc_crop_surf);
+  if (ctx->prealloc_rot_surf)  NvBufSurfaceDestroy(ctx->prealloc_rot_surf);
   delete ctx;
 }

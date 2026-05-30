@@ -21,7 +21,12 @@
  * DEALINGS IN THE SOFTWARE.
  */
 #include "postprocesslib_impl.h"
+#include "nvdspreprocess_meta.h"
 #include <filesystem>
+#include <cuda_runtime.h>
+#include <cuda_fp16.h>
+
+// #include "thermal_render.h"
 
 using namespace std;
 
@@ -388,18 +393,19 @@ bool PostProcessAlgorithm::SetConfigFile (const gchar *cfg_file_path){
     }
   }
   else if (m_initParams.networkType == NvDsPostProcessNetworkType_Classifier ||
-           m_initParams.networkType == NvDsPostProcessNetworkType_Segmentation ||
-           m_initParams.networkType ==  NvDsPostProcessNetworkType_BodyPose){
+          m_initParams.networkType == NvDsPostProcessNetworkType_Segmentation ||
+          m_initParams.networkType == NvDsPostProcessNetworkType_BodyPose ||
+          m_initParams.networkType == 100) {
 
-    status = preparePostProcess();
-    if (status != NVDSPOSTPROCESS_SUCCESS){
-      return false;
-    }
+      status = preparePostProcess();
+      if (status != NVDSPOSTPROCESS_SUCCESS){
+        return false;
+      }
   }
   else {
-    printError("Parsing for network type %d is not supported",
-        m_initParams.networkType);
-    return false;
+      printError("Parsing for network type %d is not supported",
+          m_initParams.networkType);
+      return false;
   }
 
   m_processLock.unlock();
@@ -434,8 +440,8 @@ PostProcessAlgorithm::preparePostProcess(){
     break;
     //FIXME:
   case NvDsPostProcessNetworkType_Other:
-    printWarning(" Failed to validate the network type not supported, %d",m_initParams.networkType);
-    return ret;
+    m_Postprocessor = nullptr;
+    return NVDSPOSTPROCESS_SUCCESS;
   default:
     printError(" Failed to validate the network type, unknown network %d",m_initParams.networkType);
     return ret;
@@ -599,6 +605,8 @@ PostProcessAlgorithm::~PostProcessAlgorithm()
     }
     g_free (m_initParams.outputLayerNames);
   }
+
+  // ThermalRender_Shutdown();
 }
 
 // Returns NvDsBatchMeta if present in the gstreamer buffer else NULL
@@ -656,7 +664,6 @@ BufferResult PostProcessAlgorithm::ProcessBuffer (GstBuffer *inbuf)
 
   return BufferResult::Buffer_Async;
 }
-
 
 
 /* Output Processing Thread */
@@ -751,109 +758,53 @@ void PostProcessAlgorithm::OutputThread(void)
     }
     else
     {
-      /* Iterate each frame metadata in batch */
-      for (NvDsMetaList * l_frame = batch_meta->frame_meta_list; l_frame != NULL;
-          l_frame = l_frame->next) {
-        NvDsFrameMeta *frame_meta = (NvDsFrameMeta *) l_frame->data;
+        /* Iterate each frame metadata in batch */
+        for (NvDsMetaList *l_frame = batch_meta->frame_meta_list;
+            l_frame != NULL;
+            l_frame = l_frame->next)
+        {
 
-        if (m_processMode == PROCESS_MODEL_FULL_FRAME){
-          /* Iterate user metadata in frames to search PGIE's tensor metadata */
-          for (NvDsMetaList * l_user = frame_meta->frame_user_meta_list;
-              l_user != NULL; l_user = l_user->next) {
-            NvDsUserMeta *user_meta = (NvDsUserMeta *) l_user->data;
-            if (user_meta->base_meta.meta_type != NVDSINFER_TENSOR_OUTPUT_META)
-              continue;
+            NvDsFrameMeta *frame_meta = (NvDsFrameMeta *)l_frame->data;
 
-            /* convert to tensor metadata */
-            NvDsInferTensorMeta *meta =
-              (NvDsInferTensorMeta *) user_meta->user_meta_data;
-            //PGIE and operate on meta->unique_id data only
-            if (meta->unique_id == m_gieUniqueId){
-              for (unsigned int i = 0; i < meta->num_output_layers; i++) {
-                NvDsInferLayerInfo *info = &meta->output_layers_info[i];
-                info->buffer = meta->out_buf_ptrs_host[i];
-              }
-              /* Parse output tensor and fill detection results into objectList. */
-              std::vector < NvDsInferLayerInfo >
-                outputLayersInfo (meta->output_layers_info,
-                    meta->output_layers_info + meta->num_output_layers);
-              NvDsPostProcessFrameOutput output;
-              memset (&output, 0, sizeof(output));
-              if (m_Postprocessor){
-                m_Postprocessor->setNetworkInfo(meta->network_info);
-                m_Postprocessor->parseEachFrame(outputLayersInfo, output);
-                m_Postprocessor->attachMetadata (in_surf, frame_meta->batch_id,
-                    batch_meta, frame_meta, NULL, NULL,
-                    output,
-                    m_initParams.perClassDetectionParams,
-                    m_filterOutClassIds,
-                    m_gieUniqueId,
-                    m_outputInstanceMask,
-                    m_processMode, m_segmentationThreshold,
-                    meta->maintain_aspect_ratio, NULL,
-                    meta->symmetric_padding);
+            if (m_processMode == PROCESS_MODEL_FULL_FRAME)
+            {                    
+                /* 🔵 buscar OUTPUT tensor (incluye INPUT internamente) */
+                // Con input-tensor-from-meta=1, el tensor está dentro del ROI meta
+                for (NvDsMetaList *l_user = frame_meta->frame_user_meta_list;
+                    l_user != NULL; l_user = l_user->next)
+                {
+                    NvDsUserMeta *user_meta = (NvDsUserMeta *)l_user->data;
 
-                m_Postprocessor->releaseFrameOutput (output);
-              }
-              else {
-                GST_WARNING_OBJECT(m_element, "Post Processor not initialized for network");
-              }
+                    // Nivel 1: buscar ROI meta
+                    if (user_meta->base_meta.meta_type != NVDS_ROI_META)
+                        continue;
+
+                    NvDsRoiMeta *roi_meta = (NvDsRoiMeta *)user_meta->user_meta_data;
+
+                    // Nivel 2: buscar tensor meta dentro del ROI
+                    for (NvDsUserMetaList *r_user = roi_meta->roi_user_meta_list;
+                        r_user != NULL; r_user = r_user->next)
+                    {
+                        NvDsUserMeta *tensor_user_meta = (NvDsUserMeta *)r_user->data;
+
+                        if (tensor_user_meta->base_meta.meta_type != NVDSINFER_TENSOR_OUTPUT_META)
+                            continue;
+
+                        NvDsInferTensorMeta *meta =
+                            (NvDsInferTensorMeta *)tensor_user_meta->user_meta_data;
+
+                        if (meta->unique_id != m_gieUniqueId)
+                            continue;
+
+                        // Asignar host buffers
+                        for (unsigned int i = 0; i < meta->num_output_layers; i++)
+                            meta->output_layers_info[i].buffer = meta->out_buf_ptrs_host[i];
+
+                        RenderThermalOutput(in_surf, frame_meta->batch_id, meta, frame_meta);
+                    }
+                }
             }
-          }
         }
-        else if (m_processMode == PROCESS_MODEL_OBJECTS){
-          /* Iterate object metadata in frame */
-          for (NvDsMetaList * l_obj = frame_meta->obj_meta_list; l_obj != NULL;
-              l_obj = l_obj->next) {
-            NvDsObjectMeta *obj_meta = (NvDsObjectMeta *) l_obj->data;
-
-            /* Iterate user metadata in object to search SGIE's tensor data */
-            for (NvDsMetaList * l_user = obj_meta->obj_user_meta_list; l_user != NULL;
-                l_user = l_user->next) {
-              NvDsUserMeta *user_meta = (NvDsUserMeta *) l_user->data;
-              if (user_meta->base_meta.meta_type != NVDSINFER_TENSOR_OUTPUT_META)
-                continue;
-
-              /* convert to tensor metadata */
-              NvDsInferTensorMeta *meta =
-                (NvDsInferTensorMeta *) user_meta->user_meta_data;
-
-              if (meta->unique_id == m_gieUniqueId){
-                for (unsigned int i = 0; i < meta->num_output_layers; i++) {
-                  NvDsInferLayerInfo *info = &meta->output_layers_info[i];
-                  info->buffer = meta->out_buf_ptrs_host[i];
-                }
-                std::vector < NvDsInferLayerInfo >
-                  outputLayersInfo (meta->output_layers_info,
-                      meta->output_layers_info + meta->num_output_layers);
-                NvDsPostProcessFrameOutput output;
-                memset (&output, 0, sizeof(output));
-
-                if (m_Postprocessor){
-                  m_Postprocessor->setNetworkInfo(meta->network_info);
-                  m_Postprocessor->parseEachFrame(outputLayersInfo, output);
-                  /* Generate classifer metadata and attach to obj_meta */
-                  m_Postprocessor->attachMetadata (in_surf, frame_meta->batch_id,
-                      batch_meta, frame_meta, obj_meta, obj_meta,
-                      output,
-                      m_initParams.perClassDetectionParams,
-                      m_filterOutClassIds,
-                      m_gieUniqueId,
-                      m_outputInstanceMask,
-                      m_processMode, m_segmentationThreshold,
-                      meta->maintain_aspect_ratio, NULL,
-                      meta->symmetric_padding);
-                  m_Postprocessor->releaseFrameOutput (output);
-                }
-                else {
-
-                  GST_WARNING_OBJECT(m_element, "Post Processor not initialized for network");
-                }
-              }
-            }
-          }
-        }
-      }
     }
 
     nvds_set_output_system_timestamp (outBuffer, GST_ELEMENT_NAME(m_element));
@@ -873,4 +824,363 @@ void PostProcessAlgorithm::OutputThread(void)
   return;
 }
 
+
+
+
+
+
+
+// ============================================================
+// RenderThermalOutput
+// ============================================================
+
+static constexpr float TS_MEAN  = 1861.5075235004497f;
+static constexpr float TS_STD   = 296.8565934989852f;
+static constexpr float T_MIN    = 1500.0f;
+static constexpr float T_MAX    = 2150.0f;
+static constexpr float SCALE_Z  = 5.5f  / 128.0f;
+static constexpr float SCALE_R  = 0.6f  / 32.0f; 
+static constexpr int   N_TICKS_Z = 12;
+static constexpr int   N_TICKS_R = 3;
+
+// Máscara Otsu dinámica
+static cv::Mat compute_otsu_mask(const float* chw_data, int H, int W)
+{
+    const float* G = chw_data + H * W;
+
+    float g_min = *std::min_element(G, G + H * W);
+    float g_max = *std::max_element(G, G + H * W);
+
+    cv::Mat G_mat(H, W, CV_32F);
+    float range = g_max - g_min;
+    for (int i = 0; i < H * W; i++)
+        G_mat.at<float>(i / W, i % W) =
+            (range > 0.f) ? (G[i] - g_min) / range : 0.f;
+
+    cv::Mat G_uint8;
+    G_mat.convertTo(G_uint8, CV_8U, 255.0);
+
+    cv::Mat mask;
+    double thresh = cv::threshold(G_uint8, mask, 0, 255,
+                                  cv::THRESH_BINARY | cv::THRESH_OTSU);
+
+    std::cout << "[OTSU] threshold=" << thresh << std::endl;
+
+    return mask;  // CV_8U, 255=llama 0=fondo
+}
+
+// Panel Ts + canales RGB
+static cv::Mat build_ts_rgb_panel(
+    const float* tensor_chw,
+    const float* Ts,
+    const cv::Mat& mask,
+    int H, int W)
+{
+    // Ts → Kelvin → colormap
+    cv::Mat Ts_k(H, W, CV_32F);
+    for (int i = 0; i < H * W; i++)
+        Ts_k.at<float>(i / W, i % W) = Ts[i] * TS_STD + TS_MEAN;
+
+    cv::Mat Ts_norm(H, W, CV_32F);
+    for (int i = 0; i < H * W; i++) {
+        float v = (Ts_k.at<float>(i / W, i % W) - T_MIN) / (T_MAX - T_MIN);
+        Ts_norm.at<float>(i / W, i % W) = std::max(0.f, std::min(1.f, v));
+    }
+
+    cv::Mat Ts_u8;
+    Ts_norm.convertTo(Ts_u8, CV_8U, 255.0);
+    cv::Mat Ts_color;
+    cv::applyColorMap(Ts_u8, Ts_color, cv::COLORMAP_INFERNO);
+
+    // Zona fuera de llama → blanco
+    for (int y = 0; y < H; y++)
+        for (int x = 0; x < W; x++)
+            if (!mask.at<uchar>(y, x))
+                Ts_color.at<cv::Vec3b>(y, x) = {255, 255, 255};
+
+    // Canales RGB
+    std::vector<cv::Mat> rgb_panels;
+    for (int c : {0, 1, 2}) {
+        const float* ch_ptr = tensor_chw + c * H * W;
+        float cmin = *std::min_element(ch_ptr, ch_ptr + H * W);
+        float cmax = *std::max_element(ch_ptr, ch_ptr + H * W);
+
+        cv::Mat ch_norm(H, W, CV_32F);
+        for (int i = 0; i < H * W; i++) {
+            float v = (cmax > cmin)
+                ? (ch_ptr[i] - cmin) / (cmax - cmin)
+                : 0.f;
+            ch_norm.at<float>(i / W, i % W) = v;
+        }
+
+        cv::Mat ch_u8;
+        ch_norm.convertTo(ch_u8, CV_8U, 255.0);
+        cv::Mat ch_color;
+        cv::applyColorMap(ch_u8, ch_color, cv::COLORMAP_VIRIDIS);
+
+        for (int y = 0; y < H; y++)
+            for (int x = 0; x < W; x++)
+                if (!mask.at<uchar>(y, x))
+                    ch_color.at<cv::Vec3b>(y, x) = {255, 255, 255};
+
+        rgb_panels.push_back(ch_color);
+    }
+
+    // Panel horizontal: Ts | R | G | B
+    cv::Mat row_panel;
+    std::vector<cv::Mat> cols = {Ts_color,
+                                  rgb_panels[0],
+                                  rgb_panels[1],
+                                  rgb_panels[2]};
+    cv::hconcat(cols, row_panel);
+
+    // Labels
+    const cv::Scalar black(0, 0, 0);
+    const cv::Scalar white(255, 255, 255);
+    const int font = cv::FONT_HERSHEY_SIMPLEX;
+    cv::putText(row_panel, "Ts",          {5,        14}, font, 0.4, black, 1);
+    cv::putText(row_panel, "B",           {W + 5,    14}, font, 0.4, black, 1);
+    cv::putText(row_panel, "G",           {2*W + 5,  14}, font, 0.4, black, 1);
+    cv::putText(row_panel, "R",           {3*W + 5,  14}, font, 0.4, black, 1);
+
+    // Temperatura media sobre llama
+    float sum_T = 0.f; int cnt = 0;
+    for (int y = 0; y < H; y++)
+        for (int x = 0; x < W; x++)
+            if (mask.at<uchar>(y, x)) {
+                sum_T += Ts_k.at<float>(y, x);
+                cnt++;
+            }
+    if (cnt > 0) {
+        char buf[32];
+        std::snprintf(buf, sizeof(buf), "Mean: %.0fK", sum_T / cnt);
+        cv::putText(row_panel, buf, {5, H - 4}, font, 0.35, black, 1);
+    }
+
+    // Colorbars
+    int cb_w = row_panel.cols;
+    int cb_h = 16;
+    cv::Mat grad(1, cb_w, CV_8U);
+    for (int x = 0; x < cb_w; x++)
+        grad.at<uchar>(0, x) = (uchar)(x * 255 / (cb_w - 1));
+
+    cv::Mat cb_ts_1d, cb_rgb_1d;
+    cv::applyColorMap(grad, cb_ts_1d,  cv::COLORMAP_INFERNO);
+    cv::applyColorMap(grad, cb_rgb_1d, cv::COLORMAP_VIRIDIS);
+
+    cv::Mat cb_ts  = cv::repeat(cb_ts_1d,  cb_h, 1);
+    cv::Mat cb_rgb = cv::repeat(cb_rgb_1d, cb_h, 1);
+
+    char buf_min[16], buf_max[16];
+    std::snprintf(buf_min, sizeof(buf_min), "%.0f", T_MIN);
+    std::snprintf(buf_max, sizeof(buf_max), "%.0f", T_MAX);
+    cv::putText(cb_ts,  buf_min, {4, cb_h - 3}, font, 0.35, white, 1);
+    cv::putText(cb_ts,  buf_max, {cb_w - 42, cb_h - 3}, font, 0.35, white, 1);
+    cv::putText(cb_rgb, "0",     {4, cb_h - 3}, font, 0.35, white, 1);
+    cv::putText(cb_rgb, "1",     {cb_w - 12, cb_h - 3}, font, 0.35, white, 1);
+
+    cv::Mat final_panel;
+    cv::vconcat(std::vector<cv::Mat>{row_panel, cb_ts, cb_rgb}, final_panel);
+    return final_panel;
+}
+
+// Gráfico centerline
+static cv::Mat build_centerline_panel(
+    const float* Ts, const cv::Mat& mask, int H, int W)
+{
+    int col = W / 2;
+
+    std::vector<int>   z_vals;
+    std::vector<float> T_vals;
+
+    for (int y = 0; y < H; y++) {
+        if (!mask.at<uchar>(y, col)) continue;
+        float T_k = Ts[y * W + col] * TS_STD + TS_MEAN;
+        z_vals.push_back(y);
+        T_vals.push_back(T_k);
+    }
+
+    const int W_c = 300, H_c = 200, M = 35;
+    cv::Mat canvas(H_c, W_c, CV_8UC3, cv::Scalar(255, 255, 255));
+
+    if (z_vals.empty()) {
+        cv::putText(canvas, "No data", {W_c/2 - 30, H_c/2},
+                    cv::FONT_HERSHEY_SIMPLEX, 0.5, {0,0,0}, 1);
+        return canvas;
+    }
+
+    // Escalas
+    float z_min = (float)z_vals.front();
+    float z_max = (float)z_vals.back();
+
+    auto px_x = [&](float z) -> int {
+        return M + (int)((z - z_min) / (z_max - z_min + 1e-8f)
+                         * (W_c - 2 * M));
+    };
+    auto px_y = [&](float T) -> int {
+        return H_c - M - (int)(((T - T_MIN) / (T_MAX - T_MIN + 1e-8f))
+                               * (H_c - 2 * M));
+    };
+
+    // Ejes
+    cv::line(canvas, {M, H_c - M}, {W_c - M, H_c - M}, {0,0,0}, 1);
+    cv::line(canvas, {M, M},       {M, H_c - M},        {0,0,0}, 1);
+
+    // Ticks eje Z
+    for (int t = 0; t <= N_TICKS_Z; t++) {
+        float z_t = z_min + t * (z_max - z_min) / N_TICKS_Z;
+        int   px  = px_x(z_t);
+        cv::line(canvas, {px, H_c - M}, {px, H_c - M + 3}, {0,0,0}, 1);
+        if (t % 3 == 0) {
+            char buf[8];
+            std::snprintf(buf, sizeof(buf), "%.1f", z_t * SCALE_Z);
+            cv::putText(canvas, buf, {px - 10, H_c - M + 12},
+                        cv::FONT_HERSHEY_SIMPLEX, 0.28, {0,0,0}, 1);
+        }
+    }
+
+    // Ticks eje T
+    for (int t = 0; t <= N_TICKS_R; t++) {
+        float T_t = T_MIN + t * (T_MAX - T_MIN) / N_TICKS_R;
+        int   py  = px_y(T_t);
+        cv::line(canvas, {M - 3, py}, {M, py}, {0,0,0}, 1);
+        char buf[8];
+        std::snprintf(buf, sizeof(buf), "%.0f", T_t);
+        cv::putText(canvas, buf, {1, py + 4},
+                    cv::FONT_HERSHEY_SIMPLEX, 0.28, {0,0,0}, 1);
+    }
+
+    // Curva
+    for (int i = 0; i + 1 < (int)z_vals.size(); i++)
+        cv::line(canvas,
+                 {px_x((float)z_vals[i]),     px_y(T_vals[i])},
+                 {px_x((float)z_vals[i + 1]), px_y(T_vals[i + 1])},
+                 {0, 0, 200}, 2);
+
+    // Labels ejes
+    const int font = cv::FONT_HERSHEY_SIMPLEX;
+    cv::putText(canvas, "z [mm]", {W_c/2 - 20, H_c - 3},  font, 0.35, {0,0,0}, 1);
+    cv::putText(canvas, "T[K]",   {1, M - 5},               font, 0.35, {0,0,0}, 1);
+
+    return canvas;
+}
+
+// RenderThermalOutput
+void PostProcessAlgorithm::RenderThermalOutput(
+    NvBufSurface* surf,
+    guint         batch_id,
+    NvDsInferTensorMeta* meta,
+    NvDsFrameMeta* frame_meta)
+{
+    // Guards
+    if (!meta || meta->num_output_layers == 0) return;
+
+    auto& layer = meta->output_layers_info[0];
+
+    // Control de frecuencia de visualización 
+    // Cambiar RENDER_EVERY para visualizar cada N frames
+    static constexpr int RENDER_EVERY = 1;
+    static std::atomic<int> frame_counter{0};
+    int cur = frame_counter.fetch_add(1);
+    if (cur % RENDER_EVERY != 0) return;
+
+    // Parseo de dims
+    int C = 1, H = 128, W = 32;
+    if (layer.inferDims.numDims == 3) {
+        C = layer.inferDims.d[0];
+        H = layer.inferDims.d[1];
+        W = layer.inferDims.d[2];
+    } else if (layer.inferDims.numDims == 4) {
+        C = layer.inferDims.d[1];
+        H = layer.inferDims.d[2];
+        W = layer.inferDims.d[3];
+    }
+    int S = C * H * W;
+
+    // Copiar tensor output a host
+    size_t batch_off = (layer.inferDims.numDims == 4) ? batch_id : 0;
+    std::vector<float> Ts(S);
+
+    if (layer.dataType == NvDsInferDataType::FLOAT) {
+        const float* src =
+            reinterpret_cast<float*>(layer.buffer) + batch_off * S;
+        std::memcpy(Ts.data(), src, S * sizeof(float));
+    } else if (layer.dataType == NvDsInferDataType::HALF) {
+        const __half* src =
+            reinterpret_cast<__half*>(layer.buffer) + batch_off * S;
+        for (int i = 0; i < S; i++)
+            Ts[i] = __half2float(src[i]);
+    } else {
+        std::cout << "RenderThermalOutput: unsupported datatype" << std::endl;
+        return;
+    }
+
+    // Obtener tensor de entrada (CHW float32)
+    // Buscar en batch_user_meta_list el tensor de preprocesamiento
+    std::vector<float> input_tensor(3 * H * W, 0.f);
+    bool got_input = false;
+
+    if (frame_meta && frame_meta->base_meta.batch_meta) {
+        NvDsBatchMeta* bm = frame_meta->base_meta.batch_meta;
+        for (NvDsMetaList* l = bm->batch_user_meta_list;
+             l != nullptr; l = l->next)
+        {
+            auto* um = reinterpret_cast<NvDsUserMeta*>(l->data);
+            if (um->base_meta.meta_type != NVDS_PREPROCESS_BATCH_META)
+                continue;
+            auto* pm = reinterpret_cast<GstNvDsPreProcessBatchMeta*>(um->user_meta_data);
+            if (!pm->tensor_meta) continue;
+
+            // raw_tensor_buffer es float32 CHW en device (unified memory)
+            const float* dev_ptr =
+                reinterpret_cast<const float*>(
+                    pm->tensor_meta->raw_tensor_buffer);
+
+            // Copiar a host 
+            // Unified memory → accesible directamente,
+            // pero cudaMemcpy garantiza coherencia
+            cudaMemcpy(input_tensor.data(), dev_ptr,
+                       3 * H * W * sizeof(float),
+                       cudaMemcpyDeviceToHost);
+            got_input = true;
+            break;
+        }
+    }
+
+    // Máscara Otsu 
+    cv::Mat mask;
+    if (got_input) {
+        mask = compute_otsu_mask(input_tensor.data(), H, W);
+    } else {
+        // Fallback: máscara completa
+        mask = cv::Mat(H, W, CV_8U, cv::Scalar(255));
+        std::cout << "[OTSU] input tensor not available, using full mask" << std::endl;
+    }
+
+    // Construir paneles
+    cv::Mat panel_ts = build_ts_rgb_panel(
+        got_input ? input_tensor.data() : nullptr,
+        Ts.data(), mask, H, W);
+
+    cv::Mat panel_cl = build_centerline_panel(Ts.data(), mask, H, W);
+
+    // Igualar altura
+    if (panel_cl.rows != panel_ts.rows)
+        cv::resize(panel_cl, panel_cl, {panel_cl.cols, panel_ts.rows});
+
+    cv::Mat combined;
+    cv::hconcat(panel_ts, panel_cl, combined);
+
+    // TEMPORAL: Guardar en disco
+    // Nombrar por número de frame para tener una imagen por frame
+    static std::atomic<int> save_counter{0};
+    int frame_id = save_counter.fetch_add(1);
+
+    std::string fname = "render_frame_" + std::to_string(frame_id) + ".png";
+    bool ok = cv::imwrite(fname, combined);
+    std::cout << "[RENDER] saved " << fname
+              << " (" << combined.cols << "x" << combined.rows << ")"
+              << (ok ? " OK" : " FAILED") << std::endl;
+    std::cout.flush();
+}
 

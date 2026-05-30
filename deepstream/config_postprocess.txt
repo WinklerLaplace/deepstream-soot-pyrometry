@@ -1,0 +1,6 @@
+property:
+  gpu-id: 0
+  gie-unique-id: 1
+  network-type: 100
+  process-mode: 1
+  output-blob-names: outputs

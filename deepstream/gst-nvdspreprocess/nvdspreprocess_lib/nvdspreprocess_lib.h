@@ -79,4 +79,16 @@ CustomCtx *initLib(CustomInitParams initparams);
 extern "C"
 void deInitLib(CustomCtx *ctx);
 
+/**
+ * custom: Initialize CUDA constant memory for preprocessing (called once at startup)
+ */
+extern "C"
+void init_preprocess_constants(float inv_xmax, const float* means, const float* stds);
+
+/**
+ * custom: Fused RGBA+pitch → CHW BGR + normalize kernel launcher
+ */
+extern "C"
+void launch_preprocess(const unsigned char* rgba_dev, float* chw_dev, int H, int W, int pitch_bytes);
+
 #endif

@@ -21,17 +21,20 @@
 # DEALINGS IN THE SOFTWARE.
 ################################################################################
 
-CUDA_VER?=
+CUDA_VER=12.6
 ifeq ($(CUDA_VER),)
   $(error "CUDA_VER is not set")
 endif
 
 TARGET_DEVICE = $(shell gcc -dumpmachine | cut -f1 -d -)
+
 CXX:= g++ -std=c++17
+NVCC:= /usr/local/cuda-$(CUDA_VER)/bin/nvcc
 
 SRCS:= postprocesslib_impl.cpp post_processor.cpp post_processor_detect.cpp \
        post_processor_instance_segment.cpp  post_processor_custom_impl.cpp \
-       post_processor_classify.cpp post_processor_segmentation.cpp post_processor_bodypose.cpp
+       post_processor_classify.cpp post_processor_segmentation.cpp post_processor_bodypose.cpp \
+	   render_postprocess.cu
 
 INCS:= $(wildcard *.h)
 LIB:=libpostprocess_impl.so
@@ -41,7 +44,8 @@ NVDS_VERSION:=7.1
 CFLAGS+= -fPIC -DDS_VERSION=\"7.1.0\" \
 	 -I /usr/local/cuda-$(CUDA_VER)/include \
 	 -I ../../../includes -I../includes  -I../../eigen/ -I /opt/nvidia/deepstream/deepstream-$(NVDS_VERSION)/sources/includes -I./ \
-	 -I /opt/nvidia/deepstream/deepstream-$(NVDS_VERSION)/sources/gst-plugins/gst-nvdspostprocess/includes
+	 -I /opt/nvidia/deepstream/deepstream-$(NVDS_VERSION)/sources/gst-plugins/gst-nvdspostprocess/includes \
+	 -I /opt/nvidia/deepstream/deepstream-7.1/sources/gst-plugins/gst-nvdspreprocess/include
 
 GST_INSTALL_DIR?=/opt/nvidia/deepstream/deepstream-$(NVDS_VERSION)/lib/gst-plugins/
 LIB_INSTALL_DIR?=/opt/nvidia/deepstream/deepstream-$(NVDS_VERSION)/lib/
@@ -58,7 +62,9 @@ LIBS += -shared -Wl,-no-undefined -L/usr/lib/x86_64-linux-gnu/  -lyaml-cpp \
 	-Wl,-rpath,$(LIB_INSTALL_DIR)
 
 OBJS:= $(SRCS:.cpp=.o)
-PKGS:= gstreamer-1.0 gstreamer-base-1.0 gstreamer-video-1.0
+OBJS:= $(OBJS:.cu=.o)
+
+PKGS:= gstreamer-1.0 gstreamer-base-1.0 gstreamer-video-1.0 opencv4
 
 CFLAGS+=$(shell pkg-config --cflags $(PKGS))
 LIBS+=$(shell pkg-config --libs $(PKGS))
@@ -69,6 +75,11 @@ all: $(LIB)
 	@echo $(CFLAGS)
 	$(CXX) -c -o $@ $(CFLAGS) $<
 
+%.o: %.cu $(INCS) Makefile
+	$(NVCC) -c -o $@ $< \
+	-Xcompiler -fPIC \
+	-I /usr/local/cuda-$(CUDA_VER)/include
+	
 $(LIB): $(OBJS) $(DEP) Makefile
 	@echo $(CFLAGS)
 	$(CXX) -o $@ $(OBJS) $(LIBS)

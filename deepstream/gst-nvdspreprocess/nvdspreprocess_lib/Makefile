@@ -19,7 +19,8 @@ CXX:= g++
 NVCC:=/usr/local/cuda-$(CUDA_VER)/bin/nvcc
 
 SRCS:= nvdspreprocess_lib.cpp nvdspreprocess_impl.cpp \
-       nvdspreprocess_conversion.cu
+       nvdspreprocess_conversion.cu 	\
+       normalize_kernel.cu
 
 INCS:= $(wildcard *.h)
 LIB:=libcustom2d_preprocess.so

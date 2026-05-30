@@ -727,12 +727,73 @@ def throughput(opt):
 #  EJECUCIÓN: VISUALIZACIÓN PERSISTENTE
 # --------------------------------------------    
 
+# ===================== TEMP =====================
+ 
+app = Flask(__name__)
+
+def generate():
+    global latest_frame
+    latest_frame = np.zeros((200, 400, 3), dtype=np.uint8)
+    cv2.putText(latest_frame, "Waiting for frames...",
+            (20, 100), cv2.FONT_HERSHEY_SIMPLEX,
+            0.7, (255,255,255), 2)
+    import time
+
+    while True:
+        if latest_frame is None:
+            time.sleep(0.01)
+            continue
+        
+        _, buffer = cv2.imencode('.jpg', latest_frame)
+        frame = buffer.tobytes()
+
+        yield (b'--frame\r\n'
+               b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
+
+@app.route('/')
+def video_feed():
+    return Response(generate(),
+                    mimetype='multipart/x-mixed-replace; boundary=frame')
+
+def start_server():
+    app.run(host='0.0.0.0', port=5000, threaded=True)
+
+threading.Thread(target=start_server, daemon=True).start()
+
+import io
+from PIL import Image
+
+def fig_to_rgb_array(fig):
+
+    buf = io.BytesIO()
+
+    fig.savefig(
+        buf,
+        format="png",
+        bbox_inches="tight",
+        pad_inches=0.05,
+        facecolor="white"
+    )
+
+    buf.seek(0)
+
+    img = np.array(
+        Image.open(buf).convert("RGB")
+    )
+
+    buf.close()
+
+    return img
+
+# ===================== TEMP =====================
+
 scale_z = 5.5 / 128
 scale_r = 0.6 / 32
 n_ticks_z = 12
 n_ticks_r = 3
     
 def visualization(opt):
+    global latest_frame # TEMP
     model = load_model(opt, opt.model, opt.weights)
     model.eval()
 
@@ -775,9 +836,68 @@ def visualization(opt):
                         Ts_i = output_np[i, 0]
                         frame_id = total_frames - len(batch_data) + i
                         mask_i = compute_mask_from_tensor(tensor_i)
-                        if frame_id % 50 == 0:
-                            render_rgb_ts(tensor_i, Ts_i, mask_i, frame_id, render_ts_dir)
-                            render_centerline(Ts_i, mask_i, frame_id, render_centerline_dir)
+                        if frame_id % 25 == 0:
+                            # render_rgb_ts(tensor_i, Ts_i, mask_i, frame_id, render_ts_dir)
+                            # render_centerline(Ts_i, mask_i, frame_id, render_centerline_dir)
+                            
+                            # ===================== TEMP =====================
+
+                            panel_ts = render_rgb_ts(
+                                tensor_i,
+                                Ts_i,
+                                mask_i,
+                                frame_id,
+                                render_ts_dir
+                            )
+
+                            panel_cl = render_centerline(
+                                Ts_i,
+                                mask_i,
+                                frame_id,
+                                render_centerline_dir
+                            )
+
+                            h1, w1 = panel_ts.shape[:2]
+                            h2, w2 = panel_cl.shape[:2]
+
+                            target_h = max(h1, h2)
+
+                            def pad_to_height(img, target_h):
+                                h, w = img.shape[:2]
+
+                                if h >= target_h:
+                                    return img
+
+                                pad_top = (target_h - h) // 2
+                                pad_bottom = target_h - h - pad_top
+
+                                return cv2.copyMakeBorder(
+                                    img,
+                                    pad_top,
+                                    pad_bottom,
+                                    0,
+                                    0,
+                                    cv2.BORDER_CONSTANT,
+                                    value=(255, 255, 255)
+                                )
+
+                            panel_ts = pad_to_height(panel_ts, target_h)
+                            panel_cl = pad_to_height(panel_cl, target_h)
+
+                            combined = np.concatenate(
+                                [panel_ts, panel_cl],
+                                axis=1
+                            )
+
+                            # Flask stream frame
+                            latest_frame = cv2.cvtColor(
+                                combined,
+                                cv2.COLOR_RGB2BGR
+                            )
+                            
+                            # ===================== TEMP =====================
+                            
+                            
 
                     batch_data = []
 
@@ -801,9 +921,66 @@ def visualization(opt):
             Ts_i = output_np[i, 0]
             frame_id = total_frames - len(batch_data) + i
             mask_i = compute_mask_from_tensor(tensor_i)
-            if frame_id % 50 == 0:
-                render_rgb_ts(tensor_i, Ts_i, mask_i, frame_id, render_ts_dir)
-                render_centerline(Ts_i, mask_i, frame_id, render_centerline_dir)
+            if frame_id % 25 == 0:
+                # render_rgb_ts(tensor_i, Ts_i, mask_i, frame_id, render_ts_dir)
+                # render_centerline(Ts_i, mask_i, frame_id, render_centerline_dir)
+                            
+                # ===================== TEMP =====================
+                
+                panel_ts = render_rgb_ts(
+                    tensor_i,
+                    Ts_i,
+                    mask_i,
+                    frame_id,
+                    render_ts_dir
+                )
+
+                panel_cl = render_centerline(
+                    Ts_i,
+                    mask_i,
+                    frame_id,
+                    render_centerline_dir
+                )
+
+                h1, w1 = panel_ts.shape[:2]
+                h2, w2 = panel_cl.shape[:2]
+
+                target_h = max(h1, h2)
+
+                def pad_to_height(img, target_h):
+                    h, w = img.shape[:2]
+
+                    if h >= target_h:
+                        return img
+
+                    pad_top = (target_h - h) // 2
+                    pad_bottom = target_h - h - pad_top
+
+                    return cv2.copyMakeBorder(
+                        img,
+                        pad_top,
+                        pad_bottom,
+                        0,
+                        0,
+                        cv2.BORDER_CONSTANT,
+                        value=(255, 255, 255)
+                    )
+
+                panel_ts = pad_to_height(panel_ts, target_h)
+                panel_cl = pad_to_height(panel_cl, target_h)
+
+                combined = np.concatenate(
+                    [panel_ts, panel_cl],
+                    axis=1
+                )
+
+                # Flask stream frame
+                latest_frame = cv2.cvtColor(
+                    combined,
+                    cv2.COLOR_RGB2BGR
+                )
+                
+                # ===================== TEMP =====================
 
     torch.cuda.synchronize()
 
@@ -828,7 +1005,7 @@ def render_rgb_ts(tensor_chw, Ts, mask, frame_id, out_dir):
     rgb_norm = np.nan_to_num(rgb_norm)
 
     # Figura
-    fig = plt.figure(figsize=(8.5, 4), dpi=300)
+    fig = plt.figure(figsize=(8.5, 4.8), dpi=120)
     gs = GridSpec(2, 4, height_ratios=[20, 0.4], wspace=0.02, hspace=0.08)
 
     # Orden
@@ -907,9 +1084,19 @@ def render_rgb_ts(tensor_chw, Ts, mask, frame_id, out_dir):
     ax_ts.yaxis.label.set_size(9)
 
     # Guardar
-    plt.savefig(os.path.join(out_dir, f"{frame_id}_rgb_ts.png"), dpi=300, bbox_inches="tight")
+    # plt.savefig(os.path.join(out_dir, f"{frame_id}_rgb_ts.png"), dpi=300, bbox_inches="tight")
 
+    # plt.close(fig)
+
+    # ===================== TEMP =====================
+    
+    img = fig_to_rgb_array(fig)
+    
     plt.close(fig)
+    
+    return img
+
+    # ===================== TEMP =====================
 
 def render_centerline(Ts, mask, frame_id, out_dir):
     os.makedirs(out_dir, exist_ok=True)
@@ -950,7 +1137,7 @@ def render_centerline(Ts, mask, frame_id, out_dir):
         T_MIN_VIS, T_MAX_VIS = 1700, 2000
 
     # Figura
-    fig, ax = plt.subplots(figsize=(7, 3), dpi=300)
+    fig, ax = plt.subplots(figsize=(7, 3.5), dpi=120)
 
     if valid_vals.size > 0:
         ax.plot(z, centerline, linewidth=2.5, label="Centerline")
@@ -969,9 +1156,19 @@ def render_centerline(Ts, mask, frame_id, out_dir):
     plt.tight_layout()
 
     # Guardar
-    plt.savefig(os.path.join(out_dir, f"{frame_id}_centerline.png"), dpi=300, bbox_inches="tight")
+    # plt.savefig(os.path.join(out_dir, f"{frame_id}_centerline.png"), dpi=300, bbox_inches="tight")
 
-    plt.close(fig)    
+    # plt.close(fig)    
+    
+    # ===================== TEMP =====================
+    
+    img = fig_to_rgb_array(fig)
+    
+    plt.close(fig)
+
+    return img
+
+    # ===================== TEMP =====================
     
 # --------------------------------------------
 #  EJECUCIÓN: SIMULACIÓN EN TIEMPO REAL
@@ -1052,6 +1249,11 @@ def simulate(opt):
                         frame_id = total_frames - len(batch_data) + i
                         tensor_i = batch_data[i]
                         Ts_i = output_np[i, 0]
+                        print("Python min:", Ts_i.min())
+                        print("Python max:", Ts_i.max())
+                        print("Python first 20:", Ts_i.flatten()[:20])
+                        #cv2.imwrite("py_raw.png",
+                        #    cv2.normalize(Ts_i, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8))
                         mask_i = compute_mask_from_tensor(tensor_i)
                         # display_ts_rgb(tensor_i, Ts_i, mask_i, frame_id)
                         # display_centerline(Ts_i, mask_i, frame_id)
@@ -1081,6 +1283,9 @@ def simulate(opt):
             frame_id = total_frames - len(batch_data) + i
             tensor_i = batch_data[i]
             Ts_i = output_np[i, 0]
+            print("Python min:", Ts_i.min())
+            print("Python max:", Ts_i.max())
+            print("Python first 20:", Ts_i.flatten()[:20])
             mask_i = compute_mask_from_tensor(tensor_i)
             # display_ts_rgb(tensor_i, Ts_i, mask_i, frame_id)
             # display_centerline(Ts_i, mask_i, frame_id)
