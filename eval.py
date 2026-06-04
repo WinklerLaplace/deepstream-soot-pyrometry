@@ -268,7 +268,7 @@ def compare_extended(opt, model_unet, model_attention_unet,
         error = np.clip(error, -100, 100)
         return error
 
-    ##  Configurar figura
+    # Configurar figura
     fig = plt.figure(figsize=(12, 7))
     gs = GridSpec(2, 8, width_ratios=[0.1,0.3,0.5, 0.5, 0.5, 0.5,0.2,0.1],wspace=0.1,hspace=0.35)
     axes = [[fig.add_subplot(gs[i, j]) for j in range(8)] for i in range(2)]
@@ -1249,11 +1249,6 @@ def simulate(opt):
                         frame_id = total_frames - len(batch_data) + i
                         tensor_i = batch_data[i]
                         Ts_i = output_np[i, 0]
-                        print("Python min:", Ts_i.min())
-                        print("Python max:", Ts_i.max())
-                        print("Python first 20:", Ts_i.flatten()[:20])
-                        #cv2.imwrite("py_raw.png",
-                        #    cv2.normalize(Ts_i, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8))
                         mask_i = compute_mask_from_tensor(tensor_i)
                         # display_ts_rgb(tensor_i, Ts_i, mask_i, frame_id)
                         # display_centerline(Ts_i, mask_i, frame_id)
@@ -1283,9 +1278,6 @@ def simulate(opt):
             frame_id = total_frames - len(batch_data) + i
             tensor_i = batch_data[i]
             Ts_i = output_np[i, 0]
-            print("Python min:", Ts_i.min())
-            print("Python max:", Ts_i.max())
-            print("Python first 20:", Ts_i.flatten()[:20])
             mask_i = compute_mask_from_tensor(tensor_i)
             # display_ts_rgb(tensor_i, Ts_i, mask_i, frame_id)
             # display_centerline(Ts_i, mask_i, frame_id)

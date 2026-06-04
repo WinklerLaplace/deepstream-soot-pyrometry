@@ -33,8 +33,9 @@ NVCC:= /usr/local/cuda-$(CUDA_VER)/bin/nvcc
 
 SRCS:= postprocesslib_impl.cpp post_processor.cpp post_processor_detect.cpp \
        post_processor_instance_segment.cpp  post_processor_custom_impl.cpp \
-       post_processor_classify.cpp post_processor_segmentation.cpp post_processor_bodypose.cpp \
-	   render_postprocess.cu
+       post_processor_classify.cpp post_processor_segmentation.cpp post_processor_bodypose.cpp
+
+CU_SRCS:= thermal_kernels.cu thermal_render.cu
 
 INCS:= $(wildcard *.h)
 LIB:=libpostprocess_impl.so
@@ -43,7 +44,8 @@ NVDS_VERSION:=7.1
 
 CFLAGS+= -fPIC -DDS_VERSION=\"7.1.0\" \
 	 -I /usr/local/cuda-$(CUDA_VER)/include \
-	 -I ../../../includes -I../includes  -I../../eigen/ -I /opt/nvidia/deepstream/deepstream-$(NVDS_VERSION)/sources/includes -I./ \
+	 -I ../../../includes -I../includes  -I../../eigen/ \
+	 -I /opt/nvidia/deepstream/deepstream-$(NVDS_VERSION)/sources/includes -I./ \
 	 -I /opt/nvidia/deepstream/deepstream-$(NVDS_VERSION)/sources/gst-plugins/gst-nvdspostprocess/includes \
 	 -I /opt/nvidia/deepstream/deepstream-7.1/sources/gst-plugins/gst-nvdspreprocess/include
 
@@ -54,7 +56,6 @@ ifeq ($(TARGET_DEVICE),aarch64)
 	LIBS := -L/usr/lib/aarch64-linux-gnu/tegra
 endif
 
-
 LIBS += -shared -Wl,-no-undefined -L/usr/lib/x86_64-linux-gnu/  -lyaml-cpp \
 	-L/usr/local/cuda-$(CUDA_VER)/lib64/ -lcudart -ldl -lpthread \
 	-L$(LIB_INSTALL_DIR) -lnvdsgst_helper -lnvdsgst_meta -lnvds_meta \
@@ -62,7 +63,7 @@ LIBS += -shared -Wl,-no-undefined -L/usr/lib/x86_64-linux-gnu/  -lyaml-cpp \
 	-Wl,-rpath,$(LIB_INSTALL_DIR)
 
 OBJS:= $(SRCS:.cpp=.o)
-OBJS:= $(OBJS:.cu=.o)
+CU_OBJS:= $(CU_SRCS:.cu=.o)
 
 PKGS:= gstreamer-1.0 gstreamer-base-1.0 gstreamer-video-1.0 opencv4
 
@@ -77,12 +78,25 @@ all: $(LIB)
 
 %.o: %.cu $(INCS) Makefile
 	$(NVCC) -c -o $@ $< \
+	-arch=sm_87 \
+	-std=c++17 \
 	-Xcompiler -fPIC \
-	-I /usr/local/cuda-$(CUDA_VER)/include
-	
-$(LIB): $(OBJS) $(DEP) Makefile
+	-Xcompiler -D__STDC_FORMAT_MACROS \
+	--diag-suppress 1394 \
+	--diag-suppress 1394 \
+	--diag-suppress 1217 \
+	-I /usr/local/cuda-$(CUDA_VER)/include \
+	-I /opt/nvidia/deepstream/deepstream-$(NVDS_VERSION)/sources/includes \
+	-I /opt/nvidia/deepstream/deepstream-$(NVDS_VERSION)/sources/gst-plugins/gst-nvdspostprocess/includes \
+	-I /opt/nvidia/deepstream/deepstream-$(NVDS_VERSION)/sources/gst-plugins/gst-nvdspreprocess/include \
+	-I /usr/include/gstreamer-1.0 \
+	-I /usr/include/glib-2.0 \
+	-I /usr/lib/aarch64-linux-gnu/glib-2.0/include \
+	-I /usr/include/opencv4
+
+$(LIB): $(OBJS) $(CU_OBJS) $(DEP) Makefile
 	@echo $(CFLAGS)
-	$(CXX) -o $@ $(OBJS) $(LIBS)
+	$(CXX) -o $@ $(OBJS) $(CU_OBJS) $(LIBS)
 
 $(DEP): $(DEP_FILES)
 	$(MAKE) -C postprocesslib_impl/
@@ -91,4 +105,4 @@ install: $(LIB)
 	cp -rv $(LIB) $(GST_INSTALL_DIR)
 
 clean:
-	rm -rf $(OBJS) $(LIB)
+	rm -rf $(OBJS) $(CU_OBJS) $(LIB)
