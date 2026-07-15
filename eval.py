@@ -516,7 +516,28 @@ def load_closeness(opt):
 #  MÉTRICA DE RENDIMIENTO: LATENCIA
 # --------------------------------------------
 
-def latency(opt):
+STAGES_PY = ["decode", "preprocess", "batch_prep", "h2d", "inference", "postprocess_display"]
+
+STAGE_LABELS_PY = {
+    "decode":               "Decodificación",
+    "preprocess":            "Preprocesamiento",
+    "batch_prep":            "Batch prep (expand+cast, from_numpy)",
+    "h2d":                   "Transferencia CPU -> GPU",
+    "inference":             "Inferencia",
+    "postprocess_display":   "Postprocesamiento + Display",
+}
+
+def _stats(vals):
+    arr = np.array(vals)
+    return {
+        "n": len(arr),
+        "median": float(np.median(arr)),
+        "p95": float(np.percentile(arr, 95)),
+        "max": float(np.max(arr)),
+        "avg": float(np.mean(arr)),
+    }
+
+def latency(opt, warmup_frames=90):
     model = load_model(opt, opt.model, opt.weights)
     model.eval()
 
@@ -525,59 +546,49 @@ def latency(opt):
 
     if not videos:
         print("No se encontraron archivos válidos.")
-        return None, None
+        return None
 
     device = torch.device("cuda")
 
-    # Eventos CUDA para profiling interno en procesos de GPU
     start_h2d = torch.cuda.Event(enable_timing=True)
     end_h2d = torch.cuda.Event(enable_timing=True)
-
     start_inf = torch.cuda.Event(enable_timing=True)
     end_inf = torch.cuda.Event(enable_timing=True)
 
     tiempos = []
+    stage_tiempos = {s: [] for s in STAGES_PY}
     total_frames = 0
 
     for video_path in videos:
-
         decoder = decode(str(video_path))
 
         while True:
             try:
                 t0 = time.perf_counter()
 
-                # Decode
                 frame = next(decoder)
                 t_decode = time.perf_counter()
 
-                # Preprocess
-                tensor = process_llamas_frame_prof(frame)
+                tensor = process_llamas_frame(frame)
                 t_pre = time.perf_counter()
 
-                # Batch (size = 1)
                 batch_array = np.expand_dims(tensor, axis=0).astype(np.float32)
-                t_np = time.perf_counter()
-
-                batch_tensor = torch.from_numpy(batch_array) 
+                batch_tensor = torch.from_numpy(batch_array)
                 t_from_numpy = time.perf_counter()
 
-                # Transferencia CPU -> GPU
+                # Transferencia CPU -> GPU: sin pinned memory, sin non_blocking
                 start_h2d.record()
-                batch_tensor = batch_tensor.to(device)  
+                batch_tensor = batch_tensor.to(device)
                 end_h2d.record()
 
-                # Inferencia
                 start_inf.record()
                 with torch.no_grad():
                     out = model(batch_tensor)
                 end_inf.record()
 
-                # Sincronización global 
                 torch.cuda.synchronize()
                 t_inf = time.perf_counter()
 
-                # Postprocesamiento + display
                 out_np = out.cpu().numpy()
                 Ts = out_np[0, 0]
                 mask = compute_mask_from_tensor(tensor)
@@ -588,204 +599,215 @@ def latency(opt):
                 latest_frame = combined
                 t_end = time.perf_counter()
 
-                # Métricas
                 h2d_ms = start_h2d.elapsed_time(end_h2d)
                 inf_ms = start_inf.elapsed_time(end_inf)
 
-                tiempos.append(t_end - t0)
+                # Solo se registra una vez superado el warm-up
+                if total_frames >= warmup_frames:
+                    tiempos.append(t_end - t0)
+                    stage_tiempos["decode"].append(t_decode - t0)
+                    stage_tiempos["preprocess"].append(t_pre - t_decode)
+                    stage_tiempos["batch_prep"].append(t_from_numpy - t_pre)
+                    stage_tiempos["h2d"].append(h2d_ms / 1000)
+                    stage_tiempos["inference"].append(inf_ms / 1000)
+                    stage_tiempos["postprocess_display"].append(t_end - t_inf)
+
                 total_frames += 1
-
-                if total_frames % 50 == 0:
-
-                    print("\n[PROFILING LATENCIA - END TO END]")
-                    print(f"Decode:      {(t_decode - t0):.6f}s")
-                    print(f"Preprocess:  {(t_pre - t_decode):.6f}s")
-                    print(f"Expand+Cast: {(t_np - t_pre):.6f}s")
-                    print(f"From numpy:  {(t_from_numpy - t_np):.6f}s")
-                    print(f"CPU->GPU:    {h2d_ms/1000:.6f}s")
-                    print(f"Inferencia:  {inf_ms/1000:.6f}s")
-                    print(f"Post+Disp:   {(t_end - t_inf):.6f}s")
-                    print(f"Total:       {(t_end - t0):.6f}s")
 
             except StopIteration:
                 break
-
             except Exception as e:
                 print(f"Error en frame {total_frames}: {e}")
                 continue
 
     if not tiempos:
-        return None, None
+        return None
 
-    lat_max = max(tiempos)
-    lat_avg = sum(tiempos) / len(tiempos)
+    result = {"e2e": _stats(tiempos)}
+    for s in STAGES_PY:
+        result[s] = _stats(stage_tiempos[s]) if stage_tiempos[s] else None
 
-    return lat_max, lat_avg
+    return result
 
+def _aggregate_stat(stat_list):
+    medians = [r["median"] for r in stat_list]
+    p95s = [r["p95"] for r in stat_list]
+    maxs = [r["max"] for r in stat_list]
+    avgs = [r["avg"] for r in stat_list]
+    return {
+        "median_avg": float(np.mean(medians)), "median_std": float(np.std(medians)),
+        "p95_avg": float(np.mean(p95s)), "p95_std": float(np.std(p95s)),
+        "max_avg": float(np.mean(maxs)), "max_std": float(np.std(maxs)),
+        "avg_avg": float(np.mean(avgs)), "avg_std": float(np.std(avgs)),
+    }
+
+def run_latency(opt, n_repeats=10, warmup_frames=90):
+    resultados = []
+
+    for i in range(n_repeats):
+        print(f"\n=== Repetición {i + 1}/{n_repeats} (latencia) ===")
+        torch.cuda.empty_cache()
+        res = latency(opt, warmup_frames=warmup_frames)
+        if res is None:
+            print(f"Repetición {i + 1} no produjo resultados válidos, se omite.")
+            continue
+        resultados.append(res)
+
+    if not resultados:
+        print("No se obtuvieron repeticiones válidas de latencia.")
+        return None
+
+    resumen = {"n_repeticiones": len(resultados)}
+
+    # End-to-end
+    e2e_list = [r["e2e"] for r in resultados]
+    resumen["e2e"] = _aggregate_stat(e2e_list)
+
+    # Por etapa
+    resumen["stages"] = {}
+    for s in STAGES_PY:
+        stage_list = [r[s] for r in resultados if r[s] is not None]
+        if stage_list:
+            resumen["stages"][s] = _aggregate_stat(stage_list)
+
+    print("\n[RESUMEN LATENCIA — promedio de estadísticos entre repeticiones]")
+    print(f"({resumen['n_repeticiones']} repeticiones, {warmup_frames} frames de "
+          f"warm-up descartados en cada repetición)\n")
+
+    e = resumen["e2e"]
+    print("End-to-end:")
+    print(f"  Mediana: {e['median_avg']*1000:.3f} ms  (std: {e['median_std']*1000:.3f} ms)")
+    print(f"  P95:     {e['p95_avg']*1000:.3f} ms  (std: {e['p95_std']*1000:.3f} ms)")
+    print(f"  Max:     {e['max_avg']*1000:.3f} ms  (std: {e['max_std']*1000:.3f} ms)")
+    print(f"  Avg:     {e['avg_avg']*1000:.3f} ms  (std: {e['avg_std']*1000:.3f} ms)")
+
+    print("\nPor etapa:")
+    suma_medianas = 0.0
+    for s in STAGES_PY:
+        label = STAGE_LABELS_PY[s]
+        if s not in resumen["stages"]:
+            print(f"  {label}: (sin datos)")
+            continue
+        st = resumen["stages"][s]
+        suma_medianas += st["median_avg"]
+        print(f"  {label}")
+        print(f"    Mediana: {st['median_avg']*1000:.3f} ms  (std: {st['median_std']*1000:.3f} ms)")
+        print(f"    P95:     {st['p95_avg']*1000:.3f} ms  (std: {st['p95_std']*1000:.3f} ms)")
+        print(f"    Max:     {st['max_avg']*1000:.3f} ms  (std: {st['max_std']*1000:.3f} ms)")
+
+    overhead = e["median_avg"] - suma_medianas
+    print(f"\n  Suma de medianas por etapa : {suma_medianas*1000:.3f} ms")
+    print(f"  Overhead no instrumentado  : {overhead*1000:.3f} ms  "
+          f"(dispatch de Python, encolado GPU, llamadas entre etapas)")
+
+    return resumen
+ 
 # --------------------------------------------
 #  MÉTRICA DE RENDIMIENTO: THROUGHPUT
 # --------------------------------------------
-
-def throughput(opt):
+ 
+def throughput(opt, warmup_frames=90):
     model = load_model(opt, opt.model, opt.weights)
     model.eval()
-
+ 
     dataset_path = Path(opt.dataset)
     videos = sorted(dataset_path.rglob("*.mp4"))
-
+ 
     if not videos:
         print("No se encontraron archivos .mp4")
-        return None, None
-
-    batch_size = opt.batch_size
+        return None
+ 
     device = torch.device("cuda")
-
-    total_frames = 0
-    batch_data = []
-
-    start_global = time.perf_counter()
-
+ 
+    total_frames = 0  
+    frames_medidos = 0 
+    start_global = None
+ 
     for video_path in videos:
-
         for frame in decode(str(video_path)):
-
             try:
                 tensor = process_llamas_frame(frame)
-                batch_data.append(tensor)
+ 
+                batch_array = np.expand_dims(tensor, axis=0).astype(np.float32)
+                batch_tensor = torch.from_numpy(batch_array).pin_memory()
+                batch_tensor_gpu = batch_tensor.to(device, non_blocking=True)
+ 
+                with torch.no_grad():
+                    out = model(batch_tensor_gpu)
+ 
+                out_np = out.cpu().numpy()
+                Ts = out_np[0, 0]
+                mask = compute_mask_from_tensor(tensor)
+                panel_ts = display_ts_rgb(tensor, Ts, mask, total_frames)
+                panel_cl = display_centerline(Ts, mask, total_frames)
+                panel_cl = cv2.resize(panel_cl, (panel_cl.shape[1], panel_ts.shape[0]))
+                combined = np.hstack([panel_ts, panel_cl])
+                latest_frame = combined
+ 
+                if total_frames == warmup_frames:
+                    torch.cuda.synchronize()
+                    start_global = time.perf_counter()
+ 
+                if total_frames >= warmup_frames:
+                    frames_medidos += 1
+ 
                 total_frames += 1
-
-                if len(batch_data) == batch_size:
-                    batch_array = np.stack(batch_data).astype(np.float32)
-                    batch_tensor = torch.from_numpy(batch_array).pin_memory()
-                    batch_tensor_gpu = batch_tensor.to(device, non_blocking=True)
-
-                    with torch.no_grad():
-                        out = model(batch_tensor_gpu)
-
-                    # Post-procesamiento
-                    out_np = out.cpu().numpy()
-                    start_id = total_frames - len(batch_data)
-
-                    # Display
-                    for i in range(len(batch_data)):
-                        frame_id = start_id + i
-                        tensor_i = batch_data[i]
-                        Ts_i = out_np[i, 0]
-                        mask_i = compute_mask_from_tensor(tensor_i)
-                        panel_ts = display_ts_rgb(tensor_i, Ts_i, mask_i, frame_id)
-                        panel_cl = display_centerline(Ts_i, mask_i, frame_id)
-                        panel_cl = cv2.resize(panel_cl, (panel_cl.shape[1], panel_ts.shape[0]))
-                        combined = np.hstack([panel_ts, panel_cl])
-                        latest_frame = combined
-
-                    batch_data = []
-
+ 
             except Exception as e:
                 print(f"Error en frame {total_frames}: {e}")
                 continue
-
-    # Último batch
-    if batch_data:
-        batch_array = np.stack(batch_data).astype(np.float32)
-        batch_tensor = torch.from_numpy(batch_array).pin_memory()
-        batch_tensor_gpu = batch_tensor.to(device, non_blocking=True)
-
-        with torch.no_grad():
-            out = model(batch_tensor_gpu)
-
-        out_np = out.cpu().numpy()
-        start_id = total_frames - len(batch_data)
-
-        for i in range(len(batch_data)):
-            frame_id = start_id + i
-            tensor_i = batch_data[i]
-            Ts_i = out_np[i, 0]
-            mask_i = compute_mask_from_tensor(tensor_i)
-            panel_ts = display_ts_rgb(tensor_i, Ts_i, mask_i, frame_id)
-            panel_cl = display_centerline(Ts_i, mask_i, frame_id)
-            panel_cl = cv2.resize(panel_cl, (panel_cl.shape[1], panel_ts.shape[0]))
-            combined = np.hstack([panel_ts, panel_cl])
-            latest_frame = combined
-
-    # Sincronización final
+ 
     torch.cuda.synchronize()
-
     end_global = time.perf_counter()
+ 
+    if start_global is None or frames_medidos == 0:
+        print("No se alcanzó a completar el warm-up; sin datos de throughput.")
+        return None
+ 
     total_time = end_global - start_global
-
-    if total_time == 0 or total_frames == 0:
-        return None, None
-
-    thr_avg = total_frames / total_time
-
-    print(f"Throughput: {thr_avg:.2f} fps")
-    print(f"({total_frames} frames en {total_time:.2f}s)")
-
-    return thr_avg, None
+    if total_time <= 0:
+        return None
+ 
+    fps = frames_medidos / total_time
+ 
+    print(f"Throughput: {fps:.2f} fps  ({frames_medidos} frames medidos en {total_time:.2f}s, "
+          f"tras descartar {warmup_frames} frames de warm-up)")
+ 
+    return {"fps": fps, "n_frames": frames_medidos, "total_time": total_time}
+ 
+ 
+def run_throughput(opt, n_repeats=10, warmup_frames=90):
+    resultados = []
+ 
+    for i in range(n_repeats):
+        print(f"\n=== Repetición {i + 1}/{n_repeats} (throughput) ===")
+        torch.cuda.empty_cache()
+        res = throughput(opt, warmup_frames=warmup_frames)
+        if res is None:
+            print(f"Repetición {i + 1} no produjo resultados válidos, se omite.")
+            continue
+        resultados.append(res)
+ 
+    if not resultados:
+        print("No se obtuvieron repeticiones válidas de throughput.")
+        return None
+ 
+    fps_vals = [r["fps"] for r in resultados]
+    resumen = {
+        "n_repeticiones": len(resultados),
+        "fps_avg": float(np.mean(fps_vals)),
+        "fps_std": float(np.std(fps_vals)),
+    }
+ 
+    print("\n[RESUMEN THROUGHPUT — promedio entre repeticiones]")
+    print(f"FPS promedio: {resumen['fps_avg']:.2f}  (std: {resumen['fps_std']:.2f})")
+    print(f"(sobre {resumen['n_repeticiones']} repeticiones, {warmup_frames} frames de warm-up descartados en cada repetición)")
+ 
+    return resumen
     
 # --------------------------------------------
 #  EJECUCIÓN: VISUALIZACIÓN PERSISTENTE
 # --------------------------------------------    
-
-# ===================== TEMP =====================
- 
-app = Flask(__name__)
-
-def generate():
-    global latest_frame
-    latest_frame = np.zeros((200, 400, 3), dtype=np.uint8)
-    cv2.putText(latest_frame, "Waiting for frames...",
-            (20, 100), cv2.FONT_HERSHEY_SIMPLEX,
-            0.7, (255,255,255), 2)
-    import time
-
-    while True:
-        if latest_frame is None:
-            time.sleep(0.01)
-            continue
-        
-        _, buffer = cv2.imencode('.jpg', latest_frame)
-        frame = buffer.tobytes()
-
-        yield (b'--frame\r\n'
-               b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
-
-@app.route('/')
-def video_feed():
-    return Response(generate(),
-                    mimetype='multipart/x-mixed-replace; boundary=frame')
-
-def start_server():
-    app.run(host='0.0.0.0', port=5000, threaded=True)
-
-threading.Thread(target=start_server, daemon=True).start()
-
-import io
-from PIL import Image
-
-def fig_to_rgb_array(fig):
-
-    buf = io.BytesIO()
-
-    fig.savefig(
-        buf,
-        format="png",
-        bbox_inches="tight",
-        pad_inches=0.05,
-        facecolor="white"
-    )
-
-    buf.seek(0)
-
-    img = np.array(
-        Image.open(buf).convert("RGB")
-    )
-
-    buf.close()
-
-    return img
-
-# ===================== TEMP =====================
 
 scale_z = 5.5 / 128
 scale_r = 0.6 / 32
@@ -793,7 +815,6 @@ n_ticks_z = 12
 n_ticks_r = 3
     
 def visualization(opt):
-    global latest_frame # TEMP
     model = load_model(opt, opt.model, opt.weights)
     model.eval()
 
@@ -837,68 +858,8 @@ def visualization(opt):
                         frame_id = total_frames - len(batch_data) + i
                         mask_i = compute_mask_from_tensor(tensor_i)
                         if frame_id % 25 == 0:
-                            # render_rgb_ts(tensor_i, Ts_i, mask_i, frame_id, render_ts_dir)
-                            # render_centerline(Ts_i, mask_i, frame_id, render_centerline_dir)
-                            
-                            # ===================== TEMP =====================
-
-                            panel_ts = render_rgb_ts(
-                                tensor_i,
-                                Ts_i,
-                                mask_i,
-                                frame_id,
-                                render_ts_dir
-                            )
-
-                            panel_cl = render_centerline(
-                                Ts_i,
-                                mask_i,
-                                frame_id,
-                                render_centerline_dir
-                            )
-
-                            h1, w1 = panel_ts.shape[:2]
-                            h2, w2 = panel_cl.shape[:2]
-
-                            target_h = max(h1, h2)
-
-                            def pad_to_height(img, target_h):
-                                h, w = img.shape[:2]
-
-                                if h >= target_h:
-                                    return img
-
-                                pad_top = (target_h - h) // 2
-                                pad_bottom = target_h - h - pad_top
-
-                                return cv2.copyMakeBorder(
-                                    img,
-                                    pad_top,
-                                    pad_bottom,
-                                    0,
-                                    0,
-                                    cv2.BORDER_CONSTANT,
-                                    value=(255, 255, 255)
-                                )
-
-                            panel_ts = pad_to_height(panel_ts, target_h)
-                            panel_cl = pad_to_height(panel_cl, target_h)
-
-                            combined = np.concatenate(
-                                [panel_ts, panel_cl],
-                                axis=1
-                            )
-
-                            # Flask stream frame
-                            latest_frame = cv2.cvtColor(
-                                combined,
-                                cv2.COLOR_RGB2BGR
-                            )
-                            
-                            # ===================== TEMP =====================
-                            
-                            
-
+                            render_rgb_ts(tensor_i, Ts_i, mask_i, frame_id, render_ts_dir)
+                            render_centerline(Ts_i, mask_i, frame_id, render_centerline_dir)
                     batch_data = []
 
             except Exception as e:
@@ -922,65 +883,8 @@ def visualization(opt):
             frame_id = total_frames - len(batch_data) + i
             mask_i = compute_mask_from_tensor(tensor_i)
             if frame_id % 25 == 0:
-                # render_rgb_ts(tensor_i, Ts_i, mask_i, frame_id, render_ts_dir)
-                # render_centerline(Ts_i, mask_i, frame_id, render_centerline_dir)
-                            
-                # ===================== TEMP =====================
-                
-                panel_ts = render_rgb_ts(
-                    tensor_i,
-                    Ts_i,
-                    mask_i,
-                    frame_id,
-                    render_ts_dir
-                )
-
-                panel_cl = render_centerline(
-                    Ts_i,
-                    mask_i,
-                    frame_id,
-                    render_centerline_dir
-                )
-
-                h1, w1 = panel_ts.shape[:2]
-                h2, w2 = panel_cl.shape[:2]
-
-                target_h = max(h1, h2)
-
-                def pad_to_height(img, target_h):
-                    h, w = img.shape[:2]
-
-                    if h >= target_h:
-                        return img
-
-                    pad_top = (target_h - h) // 2
-                    pad_bottom = target_h - h - pad_top
-
-                    return cv2.copyMakeBorder(
-                        img,
-                        pad_top,
-                        pad_bottom,
-                        0,
-                        0,
-                        cv2.BORDER_CONSTANT,
-                        value=(255, 255, 255)
-                    )
-
-                panel_ts = pad_to_height(panel_ts, target_h)
-                panel_cl = pad_to_height(panel_cl, target_h)
-
-                combined = np.concatenate(
-                    [panel_ts, panel_cl],
-                    axis=1
-                )
-
-                # Flask stream frame
-                latest_frame = cv2.cvtColor(
-                    combined,
-                    cv2.COLOR_RGB2BGR
-                )
-                
-                # ===================== TEMP =====================
+                render_rgb_ts(tensor_i, Ts_i, mask_i, frame_id, render_ts_dir)
+                render_centerline(Ts_i, mask_i, frame_id, render_centerline_dir)
 
     torch.cuda.synchronize()
 
@@ -1084,19 +988,9 @@ def render_rgb_ts(tensor_chw, Ts, mask, frame_id, out_dir):
     ax_ts.yaxis.label.set_size(9)
 
     # Guardar
-    # plt.savefig(os.path.join(out_dir, f"{frame_id}_rgb_ts.png"), dpi=300, bbox_inches="tight")
+    plt.savefig(os.path.join(out_dir, f"{frame_id}_rgb_ts.png"), dpi=300, bbox_inches="tight")
 
-    # plt.close(fig)
-
-    # ===================== TEMP =====================
-    
-    img = fig_to_rgb_array(fig)
-    
     plt.close(fig)
-    
-    return img
-
-    # ===================== TEMP =====================
 
 def render_centerline(Ts, mask, frame_id, out_dir):
     os.makedirs(out_dir, exist_ok=True)
@@ -1156,19 +1050,9 @@ def render_centerline(Ts, mask, frame_id, out_dir):
     plt.tight_layout()
 
     # Guardar
-    # plt.savefig(os.path.join(out_dir, f"{frame_id}_centerline.png"), dpi=300, bbox_inches="tight")
+    plt.savefig(os.path.join(out_dir, f"{frame_id}_centerline.png"), dpi=300, bbox_inches="tight")
 
-    # plt.close(fig)    
-    
-    # ===================== TEMP =====================
-    
-    img = fig_to_rgb_array(fig)
-    
-    plt.close(fig)
-
-    return img
-
-    # ===================== TEMP =====================
+    plt.close(fig)    
     
 # --------------------------------------------
 #  EJECUCIÓN: SIMULACIÓN EN TIEMPO REAL
@@ -1202,8 +1086,6 @@ def video_feed():
 
 def start_server():
     app.run(host='0.0.0.0', port=5000, threaded=True)
-
-threading.Thread(target=start_server, daemon=True).start()
     
 def simulate(opt):
     global latest_frame
@@ -1366,8 +1248,8 @@ def display_ts_rgb(tensor_chw, Ts, mask, frame_id):
 def display_centerline(Ts, mask, frame_id):
     H, W = Ts.shape
 
-    # Centerline real
-    col = W // 2
+    # Centerline
+    col = 0
     line = Ts[:, col].copy()
     mask_line = mask[:, col]
     line[~mask_line] = np.nan
@@ -1443,48 +1325,57 @@ def compute_mask_from_tensor(tensor_chw):
     return mask.astype(bool)    
     
 # --------------------------------------------
-#  CONFIGURACIÓN 
+#  CONFIGURACIÓN
 # --------------------------------------------
-    
+ 
 def parse_opt():
     parser = argparse.ArgumentParser()
-
+ 
     # Configuración básica
     parser.add_argument('--batch_size', default=1, type=int,
-                        help='batch size')
+                         help='batch size (usado solo en --visualization / --simulate; '
+                              '--latency y --throughput fuerzan batch_size=1 internamente)')
     parser.add_argument('--dataset', default='datasets/img_preprocess', type=str,
-                        help='path a dataset')
+                         help='path a dataset')
     parser.add_argument('--model', default='attunet', type=str,
-                        help='modelo a evaluar')
+                         help='modelo a evaluar')
     parser.add_argument('--weights', default='weights/attunet.pth', type=str,
-                        help='path a los pesos')
-
+                         help='path a los pesos')
+ 
     # Modos de ejecución
     parser.add_argument('--eval', action='store_true',
-                        help='Evaluación del dataset sintético')
+                         help='Evaluación del dataset sintético')
     parser.add_argument('--compare', action='store_true',
-                        help='Comparar dos modelos')
+                         help='Comparar dos modelos')
     parser.add_argument('--compare_all', action='store_true',
-                        help='Comparar todos los modelos')
+                         help='Comparar todos los modelos')
     parser.add_argument('--experiment', action='store_true',
-                        help='Evaluación de Regression Accuracy')
+                         help='Evaluación de Regression Accuracy')
     parser.add_argument('--closeness', action='store_true',
-                        help='Evaluación de Regression Closeness')
+                         help='Evaluación de Regression Closeness')
     parser.add_argument('--latency', action='store_true',
-                        help='Evaluación de latencia (usa batch_size=1)')
+                         help='Evaluación de latencia (batch_size=1, N repeticiones, con warm-up)')
     parser.add_argument('--throughput', action='store_true',
-                        help='Evaluación de throughput (batch_size>1 recomendado)')
+                         help='Evaluación de throughput (batch_size=1, N repeticiones, con warm-up)')
+    parser.add_argument('--memory', action='store_true',
+                         help='Pase único fakesink (batch_size=1) para medición externa de memoria ')
     parser.add_argument('--visualization', action='store_true',
-                        help='Ejecución con visualizaciones persistentes')
+                         help='Ejecución con visualizaciones persistentes')
     parser.add_argument('--simulate', action='store_true',
-                        help='Simulación de ejecución en tiempo real')
-
+                         help='Simulación de ejecución en tiempo real (levanta servidor Flask)')
+ 
+    # Parámetros de repetición / warm-up (latencia y throughput)
+    parser.add_argument('--repeats', default=10, type=int,
+                         help='Número de repeticiones para latencia/throughput')
+    parser.add_argument('--warmup', default=90, type=int,
+                         help='Frames de warm-up descartados por repetición')
+ 
     # Especificaciones
     parser.add_argument('--case', default='A', type=str,
-                        help='condicion de llama')
-
-    return parser.parse_args()    
-
+                         help='condicion de llama')
+ 
+    return parser.parse_args()
+ 
 def main(opt):
     if opt.eval:
         model = load_model(opt, opt.model, opt.weights)
@@ -1493,7 +1384,7 @@ def main(opt):
             return
         eval(opt, model)
         return
-
+ 
     if opt.compare:
         models = opt.model.split()
         weights = opt.weights.split()
@@ -1507,64 +1398,59 @@ def main(opt):
             return
         compare(opt, model1, model2)
         return
-    
+ 
     if opt.compare_all:
         compare_all(opt)
         return
-    
+ 
     if opt.experiment:
         model = load_model(opt, opt.model, opt.weights)
         if model is None:
             print("Error en la carga del modelo.")
             return
         eval_exp(opt, model)
-        return    
-    
+        return
+ 
     if opt.closeness:
         load_closeness(opt)
         return
-    
+ 
     if opt.latency:
-        if opt.batch_size != 1:
-            print("Medir latencia requiere batch_size=1.")
-            print("Forzando batch_size=1.")
-            opt.batch_size = 1
-        l_max, l_ave = latency(opt)
-        print("Latencia max: ", l_max, "s")
-        print("Latencia ave: ", l_ave, "s")
+        run_latency(opt, n_repeats=opt.repeats, warmup_frames=opt.warmup)
         return
-
+ 
     if opt.throughput:
-        if opt.batch_size <= 0:
-            print("Error: Ingrese un batch size válido.")
-            return
-        if opt.batch_size == 1:
-            print("Se recomienda batch_size > 1 para la medición de throughput.")
-            print("Reanudando medición.")
-        _, thr = throughput(opt)
-        print("Throughput ave: ", thr, "inf/s")
+        run_throughput(opt, n_repeats=opt.repeats, warmup_frames=opt.warmup)
         return
-    
+ 
+    if opt.memory:
+        throughput(opt, warmup_frames=opt.warmup)
+        return
+ 
     if opt.visualization:
         if opt.batch_size <= 0:
             print("Error: Ingrese un batch size válido.")
             return
         else:
-            print(f"Generando visualizaciones")
+            print("Generando visualizaciones")
         visualization(opt)
         return
-    
+ 
     if opt.simulate:
         if opt.batch_size <= 0:
             print("Error: Ingrese un batch size válido.")
             return
         if opt.batch_size == 1:
-            print("Aviso: Comportamiento similar a latencia con batch_size={opt.batch_size}")
+            print(f"Aviso: Comportamiento similar a latencia con batch_size={opt.batch_size}")
         else:
             print(f"Simulación con batch_size={opt.batch_size}")
+ 
+        # El servidor Flask solo se levanta en modo --simulate,
+        threading.Thread(target=start_server, daemon=True).start()
         simulate(opt)
         return
-
+ 
 if __name__ == '__main__':
     opt = parse_opt()
     main(opt)
+    

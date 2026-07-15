@@ -35,7 +35,7 @@ SRCS:= postprocesslib_impl.cpp post_processor.cpp post_processor_detect.cpp \
        post_processor_instance_segment.cpp  post_processor_custom_impl.cpp \
        post_processor_classify.cpp post_processor_segmentation.cpp post_processor_bodypose.cpp
 
-CU_SRCS:= thermal_kernels.cu thermal_render.cu
+CU_SRCS:= thermal_kernels.cu thermal_render.cu thermal_centerline.cu thermal_text.cu thermal_panels.cu
 
 INCS:= $(wildcard *.h)
 LIB:=libpostprocess_impl.so

@@ -3,7 +3,7 @@
 DATASET="datasets/img_preprocess"
 
 OUTDIR="outputs"
-OUTFILE="$OUTDIR/closeness_results.txt"
+OUTFILE="$OUTDIR/inference_engine_closeness_results.txt"
 
 mkdir -p "$OUTDIR"
 

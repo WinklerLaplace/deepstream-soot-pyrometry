@@ -5,13 +5,13 @@
 #include <cfloat>
 #include <cstdio>
 
-// ─────────────────────────────────────────────────────────────
+// =================================================================
 // Otsu thresholding
-// ─────────────────────────────────────────────────────────────
+// =================================================================
 
-// Each thread processes one pixel. Uses shared memory to reduce
-// global atomic contention: accumulates into a per-block histogram,
-// then merges into the global one with a single atomic per bin.
+// Each thread processes one pixel. Uses shared memory to reduce global
+// atomic contention: accumulates into a per-block histogram first, then
+// merges into the global histogram with a single atomic add per bin.
 __global__ void otsu_histogram_kernel(
     const float*  __restrict__ g_channel,
     unsigned int* __restrict__ histogram,
@@ -36,56 +36,95 @@ __global__ void otsu_histogram_kernel(
         atomicAdd(&histogram[i], local_hist[i]);
 }
 
-// Maximises inter-class variance over all 256 possible thresholds.
-// Runs on the host; the histogram is only 256 ints (1 KB transfer).
-int otsu_threshold_from_histogram(const unsigned int* hist, int total)
+// Single block, 256 threads (one thread per histogram bin). Maximises
+// inter-class variance over all possible thresholds without ever leaving
+// the device:
+//   1. Hillis-Steele inclusive scan computes, for every candidate
+//      threshold t, the background weight w_bg(t) and weighted sum
+//      sum_bg(t) in log2(256)=8 steps.
+//   2. Each thread then evaluates the inter-class variance for its own
+//      bin as a candidate threshold.
+//   3. A standard tree reduction finds the argmax across all 256 bins.
+__global__ void otsu_threshold_kernel(
+    const unsigned int* __restrict__ hist,
+    int total,
+    int* __restrict__ out_threshold_bin)
 {
-    double sum_all = 0.0;
-    for (int i = 0; i < 256; i++) sum_all += i * hist[i];
+    __shared__ double s_hist[256];
+    __shared__ double s_cum[256];      // running w_bg (background pixel count)
+    __shared__ double s_cumsum[256];   // running sum_bg (sum of i * hist[i])
 
-    double sum_bg = 0.0;
-    int    w_bg   = 0;
-    double max_var = 0.0;
-    int    thresh  = 0;
+    int tid = threadIdx.x;
+    s_hist[tid] = (double)hist[tid];
+    __syncthreads();
 
-    for (int t = 0; t < 256; t++) {
-        w_bg += hist[t];
-        if (w_bg == 0) continue;
+    double w = s_hist[tid];
+    double s = tid * s_hist[tid];
+    s_cum[tid]    = w;
+    s_cumsum[tid] = s;
+    __syncthreads();
 
-        int w_fg = total - w_bg;
-        if (w_fg == 0) break;
-
-        sum_bg += t * hist[t];
-        double mean_bg = sum_bg / w_bg;
-        double mean_fg = (sum_all - sum_bg) / w_fg;
-        double diff    = mean_bg - mean_fg;
-        double var_b   = (double)w_bg * w_fg * diff * diff;
-
-        if (var_b > max_var) {
-            max_var = var_b;
-            thresh  = t;
-        }
+    for (int offset = 1; offset < 256; offset <<= 1) {
+        double w_add = (tid >= offset) ? s_cum[tid - offset]    : 0.0;
+        double s_add = (tid >= offset) ? s_cumsum[tid - offset] : 0.0;
+        __syncthreads();
+        s_cum[tid]    += w_add;
+        s_cumsum[tid] += s_add;
+        __syncthreads();
     }
-    return thresh;
+
+    __shared__ double sum_all;
+    if (tid == 255) sum_all = s_cumsum[255];
+    __syncthreads();
+
+    __shared__ double s_var[256];
+    __shared__ int    s_idx[256];
+
+    double w_bg = s_cum[tid];
+    double w_fg = total - w_bg;
+    double var_b = 0.0;
+    if (w_bg > 0.0 && w_fg > 0.0) {
+        double mean_bg = s_cumsum[tid] / w_bg;
+        double mean_fg = (sum_all - s_cumsum[tid]) / w_fg;
+        double diff = mean_bg - mean_fg;
+        var_b = w_bg * w_fg * diff * diff;
+    }
+    s_var[tid] = var_b;
+    s_idx[tid] = tid;
+    __syncthreads();
+
+    // Tree reduction for argmax
+    for (int st = 128; st > 0; st >>= 1) {
+        if (tid < st && s_var[tid + st] > s_var[tid]) {
+            s_var[tid] = s_var[tid + st];
+            s_idx[tid] = s_idx[tid + st];
+        }
+        __syncthreads();
+    }
+
+    if (tid == 0) *out_threshold_bin = s_idx[0];
 }
 
 // Pixels above threshold_norm are foreground (255); rest are background (0).
 __global__ void apply_threshold_kernel(
     const float*   __restrict__ g_norm,
     unsigned char* __restrict__ mask,
-    float threshold_norm,
+    const int*     __restrict__ threshold_bin,
     int N)
 {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= N) return;
+    float threshold_norm = *threshold_bin / 255.f;
     mask[idx] = (g_norm[idx] > threshold_norm) ? 255 : 0;
 }
 
-// ─────────────────────────────────────────────────────────────
+// =================================================================
 // Normalisation
-// ─────────────────────────────────────────────────────────────
+// =================================================================
 
-// Single-block reduction; sufficient for N=4096 (128×32).
+// Single-block reduction; sufficient for N=4096 (128x32 model output).
+// Writes both min and max in one pass, overwriting *out_min/*out_max
+// directly -- no memset needed before calling this kernel.
 __global__ void minmax_reduce_kernel(
     const float* __restrict__ data,
     float* __restrict__ out_min,
@@ -120,16 +159,17 @@ __global__ void minmax_reduce_kernel(
     }
 }
 
-// Channel 1 (G) is at offset N in the CHW tensor.
+// Channel 1 (G) sits at offset N in the CHW tensor.
 __global__ void normalise_g_channel_kernel(
     const float* __restrict__ chw,
     float*       __restrict__ g_norm,
-    float g_min, float g_max,
+    const float* __restrict__ minmax,
     int N)
 {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= N) return;
 
+    float g_min = minmax[0], g_max = minmax[1];
     float range = g_max - g_min;
     float v = (range > 0.f) ? (chw[N + idx] - g_min) / range : 0.f;
     g_norm[idx] = fmaxf(0.f, fminf(1.f, v));
@@ -139,20 +179,21 @@ __global__ void normalise_g_channel_kernel(
 __global__ void normalise_channel_kernel(
     const float* __restrict__ chw,
     float*       __restrict__ ch_norm,
-    float ch_min, float ch_max,
+    const float* __restrict__ minmax,
     int channel_offset,
     int N)
 {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= N) return;
 
+    float ch_min = minmax[0], ch_max = minmax[1];
     float range = ch_max - ch_min;
     float v = (range > 0.f) ? (chw[channel_offset + idx] - ch_min) / range : 0.f;
     ch_norm[idx] = fmaxf(0.f, fminf(1.f, v));
 }
 
-// Reverses model z-score normalisation, then remaps Kelvin → [0,1]
-// over the physical range [t_min, t_max].
+// Reverses the model's z-score normalisation, then remaps Kelvin to
+// [0,1] over the physical range [t_min, t_max].
 __global__ void normalise_ts_kernel(
     const float* __restrict__ ts_raw,
     float*       __restrict__ ts_norm,
@@ -168,9 +209,9 @@ __global__ void normalise_ts_kernel(
     ts_norm[idx] = fmaxf(0.f, fminf(1.f, v));
 }
 
-// ─────────────────────────────────────────────────────────────
+// =================================================================
 // Colormaps
-// ─────────────────────────────────────────────────────────────
+// =================================================================
 
 // INFERNO colormap. Background pixels (mask == 0) are written white.
 __global__ void colormap_ts_kernel(
@@ -208,9 +249,9 @@ __global__ void colormap_channel_kernel(
     }
 }
 
-// ─────────────────────────────────────────────────────────────
+// =================================================================
 // Compositing
-// ─────────────────────────────────────────────────────────────
+// =================================================================
 
 __global__ void composite_panel_kernel(
     const uchar4* __restrict__ panel_data,
@@ -226,29 +267,46 @@ __global__ void composite_panel_kernel(
     canvas[y * canvas_W + (x_offset + x)] = panel_data[y * panel_W + x];
 }
 
-// Converts BGR → BGRA inline while copying into the canvas.
-__global__ void paste_centerline_kernel(
-    const unsigned char* __restrict__ cl_bgr,
-    uchar4*              __restrict__ canvas,
-    int H_cl, int W_cl,
-    int canvas_W,
-    int x_offset, int y_offset)
-{
-    int x = blockIdx.x * blockDim.x + threadIdx.x;
-    int y = blockIdx.y * blockDim.y + threadIdx.y;
-    if (x >= W_cl || y >= H_cl) return;
+// =================================================================
+// Scaling
+// =================================================================
 
-    int src = (y * W_cl + x) * 3;
-    canvas[(y + y_offset) * canvas_W + (x_offset + x)] =
-        make_uchar4(cl_bgr[src], cl_bgr[src + 1], cl_bgr[src + 2], 255);
+// Standard bilinear resampling: for each destination pixel, maps back
+// to source coordinates (half-pixel-center convention), then blends the
+// 4 nearest source texels. Channels are handled generically via the
+// CH() macro so it works uniformly across .x/.y/.z (B/G/R); alpha is
+// always written as fully opaque (255), since none of the panels this
+// kernel scales carry meaningful alpha.
+__global__ void scale_bilinear_kernel(
+    const uchar4* __restrict__ src, int src_w, int src_h,
+    uchar4*       __restrict__ dst, int dst_w, int dst_h)
+{
+    int dx = blockIdx.x * blockDim.x + threadIdx.x;
+    int dy = blockIdx.y * blockDim.y + threadIdx.y;
+    if (dx >= dst_w || dy >= dst_h) return;
+
+    float sx = (dx + 0.5f) * src_w / dst_w - 0.5f;
+    float sy = (dy + 0.5f) * src_h / dst_h - 0.5f;
+    int x0 = max(0, min(src_w-1, (int)floorf(sx)));
+    int y0 = max(0, min(src_h-1, (int)floorf(sy)));
+    int x1 = min(src_w-1, x0+1), y1 = min(src_h-1, y0+1);
+    float fx = sx - x0, fy = sy - y0;
+
+    uchar4 c00 = src[y0*src_w+x0], c10 = src[y0*src_w+x1];
+    uchar4 c01 = src[y1*src_w+x0], c11 = src[y1*src_w+x1];
+
+    auto lerp = [](float a, float b, float t){ return a + (b-a)*t; };
+    #define CH(c) (unsigned char)lerp(lerp(c00.c, c10.c, fx), lerp(c01.c, c11.c, fx), fy)
+    dst[dy*dst_w+dx] = make_uchar4(CH(x), CH(y), CH(z), 255);
+    #undef CH
 }
 
-// ─────────────────────────────────────────────────────────────
+// =================================================================
 // Format conversion
-// ─────────────────────────────────────────────────────────────
+// =================================================================
 
 // BT.601 limited range. Each UV sample is the average of the four
-// BGRA pixels in its 2×2 chroma block. W and H must be even
+// BGRA pixels in its 2x2 chroma block. W and H must be even.
 __global__ void bgra_to_nv12_kernel(
     const uchar4*  __restrict__ bgra,
     unsigned char* __restrict__ y_plane,
@@ -266,8 +324,10 @@ __global__ void bgra_to_nv12_kernel(
     y_plane[y * W + x] = (unsigned char)fminf(235.f, fmaxf(16.f, Y));
 
     if ((x % 2 == 0) && (y % 2 == 0)) {
-        // Average the four pixels of the 2×2 chroma block
-        // Guards against out-of-bounds when W or H is odd (enforced even by canvas constants)
+        // Average the four pixels of the 2x2 chroma block.
+        // Guarded against out-of-bounds by the caller enforcing even
+        // W/H (canvas dimensions are compile-time constants chosen to
+        // satisfy this).
         uchar4 p00 = bgra[ y      * W +  x     ];
         uchar4 p10 = bgra[ y      * W + (x + 1)];
         uchar4 p01 = bgra[(y + 1) * W +  x     ];

@@ -2,7 +2,7 @@
 
 DATASET="datasets/img_preprocess"
 OUTDIR="outputs"
-OUTFILE="$OUTDIR/latency_results.txt"
+OUTFILE="$OUTDIR/python_baseline_latency_results.txt"
 
 mkdir -p $OUTDIR
 
@@ -19,7 +19,7 @@ MODEL_TRT_ATT_FP32="attunet_fp32.engine"
 MODEL_TRT_ATT_FP16="attunet_fp16.engine"
 MODEL_TRT_ATT_INT8="attunet_int8.engine"
 
-echo "===== LATENCY TEST =====" > $OUTFILE
+echo "===== PYTHON BASELINE LATENCY TEST =====" > $OUTFILE
 echo "Batch size fijo: $BATCH" >> $OUTFILE
 echo "Dataset: $DATASET" >> $OUTFILE
 echo "Fecha ejecución: $(date)" >> $OUTFILE

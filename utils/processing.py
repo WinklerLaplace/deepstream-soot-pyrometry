@@ -75,11 +75,14 @@ def process_llamas_image(image_dir):
     # Leer imagen
     ss = cv2.imread(image_dir, cv2.IMREAD_UNCHANGED)
 
-    # Rotación (igual que frame)
-    Py_rot = ss.transpose(1, 0, 2)[::-1]
-
     # Crop
-    Py_rgb = Py_rot[:, CENTER_X:BORDER_X, :].transpose(2, 0, 1)
+    Py_crop = ss[CENTER_X:BORDER_X, :, :]
+
+    # Rotación
+    Py_rot = Py_crop.transpose(1, 0, 2)[::-1]
+
+    # Reordenamiento CHW
+    Py_rgb = Py_rot.transpose(2, 0, 1)
 
     # Interpolación
     Py_exp_interp = np.empty((3, 128, 32), dtype=np.float32)
@@ -96,11 +99,14 @@ def process_llamas_image(image_dir):
 # --------------------------------------------
 
 def process_llamas_frame(ss):
-    # Rotación
-    Py_rot = ss.transpose(1, 0, 2)[::-1]
-
     # Crop
-    Py_rgb = Py_rot[:, CENTER_X:BORDER_X, :].transpose(2, 0, 1)
+    Py_crop = ss[CENTER_X:BORDER_X, :, :]
+
+    # Rotación
+    Py_rot = Py_crop.transpose(1, 0, 2)[::-1]
+
+    # Reordenamiento CHW
+    Py_rgb = Py_rot.transpose(2, 0, 1)
 
     # Interpolación
     Py_exp_interp = np.empty((3, 128, 32), dtype=np.float32)
@@ -131,7 +137,8 @@ def process_llamas_frame_prof(ss):
 
     t0 = time.perf_counter()
 
-    Py_rot = ss.transpose(1, 0, 2)[::-1]
+    Py_crop = ss[CENTER_X:BORDER_X, :, :]
+
     t1 = time.perf_counter()
 
     '''
@@ -142,7 +149,8 @@ def process_llamas_frame_prof(ss):
     t2 = time.perf_counter()
     '''
     
-    Py_rgb = Py_rot[:, CENTER_X:BORDER_X, :].transpose(2, 0, 1)
+    Py_rot = Py_crop.transpose(1, 0, 2)[::-1]
+    Py_rgb = Py_rot.transpose(2, 0, 1)
     t3 = time.perf_counter()
 
     Py_exp_interp = np.empty((3, 128, 32), dtype=np.float32)
